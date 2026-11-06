@@ -45,8 +45,9 @@ session is the explicit form. In unattended mode (`here --yes`) it is a
 self-check: admin rule loaded, a root-owned sshd socket on the tailnet
 address, Tailscale running and online, and an optional ping to a tailnet
 peer. Self-checks cannot see your tailnet ACL. The host firewall that was
-running before (ufw, firewalld) is stopped only under the same timer and
-comes back with a rollback.
+running before (ufw, firewalld) is stopped only under the same timer, stays
+enabled at boot until the confirmation, and comes back with a rollback. The
+rules are kept only when `nftables.service` loads a file that includes them.
 `test/e2e/run.sh` and `test/e2e/run-here.sh` exercise all of these paths,
 including forced lockouts, and check that the server comes back.
 
@@ -55,6 +56,10 @@ including forced lockouts, and check that the server comes back.
 - The server is reachable by anyone on the internet before the run, and stays
   so if the run fails, including the unattended first-boot path. The run
   itself happens over SSH with the credentials you provide.
+- A login link is completed by whoever opens it. Over SSH, a server that
+  joined through one must be reachable from your computer over the tailnet,
+  or it logs out again; on the server, you confirm the tailnet's name. Only
+  then is Tailscale SSH switched on. Unattended runs refuse the login link.
 - Secrets written to the server (the Tailscale auth key) are created mode
   0600 in a 0700 directory before any byte is written. Text the server
   returns is stripped of terminal control characters before it is shown.

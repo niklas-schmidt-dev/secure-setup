@@ -16,6 +16,7 @@ func TestRenderGolden(t *testing.T) {
 		"default":           {WANInterface: "eth0", TailnetTCPPorts: []int{22}, WebPorts: []int{443}, AllowPing: true},
 		"web-both":          {WANInterface: "ens3", TailnetTCPPorts: []int{22, 8080}, WebPorts: []int{80, 443}},
 		"tailnet-all-noweb": {WANInterface: "eth0", TailnetAll: true, TailnetTCPPorts: []int{22}, AllowPing: true},
+		"two-uplinks":       {WANInterface: "eth0", ExtraWAN: []string{"he-ipv6", "eth0", "he-ipv6"}, TailnetTCPPorts: []int{22}, WebPorts: []int{443}},
 	}
 	for name, p := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -48,6 +49,8 @@ func TestRenderRejectsBadInput(t *testing.T) {
 		{WANInterface: "eth0; reboot", TailnetTCPPorts: []int{22}}, // injection
 		{TailnetTCPPorts: []int{22}},                               // no wan
 		{WANInterface: "eth0", TailnetTCPPorts: []int{22}, WebPorts: []int{0}},
+		{WANInterface: "eth0", ExtraWAN: []string{"tailscale0"}, TailnetTCPPorts: []int{22}}, // admin as an uplink
+		{WANInterface: "eth0", ExtraWAN: []string{"x\"y"}, TailnetTCPPorts: []int{22}},       // injection
 	}
 	for i, p := range bad {
 		if _, err := Render(p); err == nil {

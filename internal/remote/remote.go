@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -60,7 +61,8 @@ type Facts struct {
 	NFT        bool
 	SSHPort    int
 	WANIface   string
-	WANIPv4    string // first IPv4 address on WANIface, when known
+	WANIfaces  []string // every device with a default route (IPv4 and IPv6), WANIface first
+	WANIPv4    string   // first IPv4 address on WANIface, when known
 	Docker     bool
 
 	Tailscale      bool   // CLI installed
@@ -75,24 +77,6 @@ type Facts struct {
 	RollbackArmed    bool   // a rollback timer from an earlier run is still active
 
 	aptUpdated bool
-}
-
-// Family groups distributions by package tooling.
-func (f *Facts) Family() string {
-	id := strings.ToLower(f.ID + " " + f.IDLike)
-	switch {
-	case strings.Contains(id, "debian") || strings.Contains(id, "ubuntu"):
-		return "debian"
-	case strings.Contains(id, "fedora") || strings.Contains(id, "rhel") || strings.Contains(id, "centos") || strings.Contains(id, "rocky") || strings.Contains(id, "almalinux"):
-		return "rhel"
-	case strings.Contains(id, "arch"):
-		return "arch"
-	case strings.Contains(id, "suse"):
-		return "suse"
-	case strings.Contains(id, "alpine"):
-		return "alpine"
-	}
-	return ""
 }
 
 const detectScript = `
@@ -113,6 +97,7 @@ sshd_bin=$(command -v sshd || echo /usr/sbin/sshd)
 printf 'SSHPORT=%s\n' "$("$sshd_bin" -T 2>/dev/null | awk '$1=="port"{print $2; exit}')"
 printf 'WAN=%s\n' "$(ip -o -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
 printf 'WAN6=%s\n' "$(ip -o -6 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+printf 'WANS=%s\n' "$({ ip -o -4 route show default; ip -o -6 route show default; } 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); break}}' | tr '\n' ' ')"
 wan=$(ip -o -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
 if [ -n "$wan" ]; then printf 'WANIP=%s\n' "$(ip -o -4 addr show dev "$wan" 2>/dev/null | awk '{print $4; exit}' | cut -d/ -f1)"; fi
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then echo UFW=1; else echo UFW=0; fi
@@ -156,6 +141,11 @@ func Detect(ctx context.Context, c Host) (*Facts, error) {
 	}
 	if f.WANIface == "" {
 		f.WANIface = kv["WAN6"]
+	}
+	for _, n := range append([]string{f.WANIface}, strings.Fields(kv["WANS"])...) {
+		if n != "" && !slices.Contains(f.WANIfaces, n) {
+			f.WANIfaces = append(f.WANIfaces, n)
+		}
 	}
 	if f.PrettyName == "" {
 		f.PrettyName = "unknown Linux"

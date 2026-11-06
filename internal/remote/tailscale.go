@@ -13,11 +13,14 @@ import (
 
 // TSStatus is the subset of `tailscale status --json` we read.
 type TSStatus struct {
-	BackendState   string            `json:"BackendState"`
-	MagicDNSSuffix string            `json:"MagicDNSSuffix"`
-	Health         []string          `json:"Health"`
-	Self           TSNode            `json:"Self"`
-	Peer           map[string]TSNode `json:"Peer"`
+	BackendState   string `json:"BackendState"`
+	MagicDNSSuffix string `json:"MagicDNSSuffix"`
+	CurrentTailnet *struct {
+		Name string `json:"Name"`
+	} `json:"CurrentTailnet"`
+	Health []string          `json:"Health"`
+	Self   TSNode            `json:"Self"`
+	Peer   map[string]TSNode `json:"Peer"`
 }
 
 // TSNode is one node in `tailscale status --json`.
@@ -39,6 +42,42 @@ func TailscaleStatus(ctx context.Context, c Host) (*TSStatus, error) {
 		return nil, fmt.Errorf("parse tailscale status: %w", err)
 	}
 	return &st, nil
+}
+
+// Tailnet names the tailnet the node is in, as far as the status shows it.
+func (s *TSStatus) Tailnet() string {
+	suffix := strings.TrimSuffix(s.MagicDNSSuffix, ".")
+	if suffix == "" {
+		if _, rest, ok := strings.Cut(strings.TrimSuffix(s.Self.DNSName, "."), "."); ok {
+			suffix = rest
+		}
+	}
+	switch {
+	case s.CurrentTailnet != nil && s.CurrentTailnet.Name != "" && suffix != "":
+		return s.CurrentTailnet.Name + " (" + suffix + ")"
+	case s.CurrentTailnet != nil && s.CurrentTailnet.Name != "":
+		return s.CurrentTailnet.Name
+	case suffix != "":
+		return suffix
+	}
+	return "unknown"
+}
+
+// TailscaleSetSSH turns Tailscale SSH on. secure-setup does this only once
+// the node is known to be in the operator's tailnet, never in `tailscale up`.
+func TailscaleSetSSH(ctx context.Context, c Host, onLine func(string)) error {
+	if err := c.Script(ctx, "tailscale set --ssh\necho \"Tailscale SSH enabled\"", onLine); err != nil {
+		return fmt.Errorf("enable Tailscale SSH: %w", err)
+	}
+	return nil
+}
+
+// TailscaleLogout takes the node off the tailnet it joined.
+func TailscaleLogout(ctx context.Context, c Host, onLine func(string)) error {
+	if err := c.Script(ctx, "tailscale logout\necho \"logged this machine out of the tailnet\"", onLine); err != nil {
+		return fmt.Errorf("tailscale logout: %w", err)
+	}
+	return nil
 }
 
 // TailscaleIPv4 returns the node's 100.x address.
@@ -92,7 +131,6 @@ func InstallTailscale(ctx context.Context, c Host, f *Facts, onLine func(string)
 type UpOptions struct {
 	AuthKey  string
 	Hostname string
-	SSH      bool
 }
 
 var loginURLRe = regexp.MustCompile(`https://login\.tailscale\.com/\S+`)
@@ -103,9 +141,6 @@ func TailscaleUp(ctx context.Context, c Host, o UpOptions, onLine func(string), 
 	args := []string{"tailscale", "up", "--timeout=15m"}
 	if o.Hostname != "" {
 		args = append(args, "--hostname="+sshx.Quote(o.Hostname))
-	}
-	if o.SSH {
-		args = append(args, "--ssh")
 	}
 	script := ""
 	if o.AuthKey != "" {

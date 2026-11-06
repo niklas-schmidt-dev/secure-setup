@@ -144,7 +144,7 @@ func runHereText(ctx context.Context, p *plan.Plan, host *localhost.Host, yes bo
 	} else {
 		fmt.Print(describe(p))
 	}
-	opts := runner.Options{Plan: p, Prompt: prompt, Local: host}
+	opts := runner.Options{Plan: p, Prompt: prompt, Local: host, Unattended: yes}
 	opts.Report = textui.Reporter(os.Stdout, runner.New(opts).Steps())
 	res, err := runner.New(opts).Run(ctx)
 	if err != nil {
@@ -324,6 +324,11 @@ elif grep -q 'Managed by secure-setup' /etc/nftables.conf 2>/dev/null; then
 	rm -f /etc/nftables.conf
 	systemctl disable nftables >/dev/null 2>&1 || true
 	echo "removed /etc/nftables.conf and disabled nftables.service at boot"
+fi
+` + remote.NFTBootFileScript + `if [ -n "$boot" ] && [ "$boot" != /etc/nftables.conf ] && [ -f "$boot" ]; then
+	sed -i '/^# secure-setup: added the next line$/{N;d;}' "$boot"
+	if [ ! -e /etc/nftables.conf ]; then sed -i '\|^include "/etc/nftables.conf"$|d' "$boot"; fi
+	echo "removed the include of /etc/nftables.conf from $boot"
 fi
 if [ -e /var/lib/secure-setup/ufw-retired ]; then
 	systemctl enable ufw >/dev/null 2>&1 || true

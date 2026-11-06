@@ -1,6 +1,8 @@
 #!/bin/sh
-# Validates the generated nftables rulesets, the Cloudflare sync script and the
-# rollback script against a real nft binary inside a throwaway Debian container.
+# Validates the generated nftables rulesets, the Cloudflare sync script, the
+# rollback script and the forward chain (in a routed lab of network namespaces,
+# hence --privileged) against a real nft binary inside a throwaway Debian
+# container.
 # Usage: scripts/validate-ruleset.sh   (uses DOCKER_CONTEXT, default nas-docker)
 set -eu
 cd "$(dirname "$0")/.."
@@ -14,7 +16,7 @@ cat > "$tmp/run.sh" <<'INNER'
 set -eu
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q >/dev/null
-apt-get install -y -q --no-install-recommends nftables curl ca-certificates iproute2 >/dev/null 2>&1
+apt-get install -y -q --no-install-recommends nftables curl ca-certificates iproute2 netcat-openbsd >/dev/null 2>&1
 echo "nft $(nft --version)"
 mkdir -p /etc/secure-setup /var/lib/secure-setup
 : > /etc/secure-setup/cloudflare.nft
@@ -37,7 +39,36 @@ rm -f /var/lib/secure-setup/previous.nft
 sh /t/assets/rollback.sh
 if nft list table inet secure_setup >/dev/null 2>&1; then echo "FAIL: table still present"; exit 1; fi
 echo "rollback without previous state removed the table"
+
+# Forward chain: a routed lab with two uplinks (upa, upb) and one workload (wl).
+# The workload listens on 8080; every uplink must be filtered like the internet.
+for n in a b c; do ip netns add "$n"; done
+ip link add upa type veth peer name a0 netns a
+ip link add upb type veth peer name b0 netns b
+ip link add wl type veth peer name c0 netns c
+i=1
+for pair in upa:a wl:c upb:b; do
+	dev=${pair%:*}; ns=${pair#*:}
+	case $dev in upa) i=1 ;; upb) i=2 ;; wl) i=3 ;; esac
+	ip addr add 10.91.$i.1/24 dev "$dev"; ip link set "$dev" up
+	ip -n "$ns" addr add 10.91.$i.2/24 dev "${ns}0"; ip -n "$ns" link set "${ns}0" up; ip -n "$ns" link set lo up
+	ip -n "$ns" route add default via 10.91.$i.1
+done
+echo 1 > /proc/sys/net/ipv4/ip_forward
+ip netns exec c nc -lk 8080 </dev/null >/dev/null 2>&1 &
+ip netns exec b nc -lk 9090 </dev/null >/dev/null 2>&1 &
+sleep 1
+reach() { ip netns exec "$1" nc -z -w 2 "$2" "$3" 2>/dev/null; }
+sed 's/"eth0"/"upa"/g' /t/goldens/default.nft > /tmp/one-uplink.nft
+sed 's/"eth0"/"upa"/g; s/"he-ipv6"/"upb"/g' /t/goldens/two-uplinks.nft > /tmp/two-uplinks.nft
+nft -f /tmp/one-uplink.nft
+if reach a 10.91.3.2 8080; then echo "FAIL: the default-route uplink reaches the workload"; exit 1; fi
+if reach b 10.91.3.2 8080; then echo "one uplink named: the second uplink still reaches the workload on 8080"; else echo "FAIL: control did not reproduce"; exit 1; fi
+nft -f /tmp/two-uplinks.nft
+if reach a 10.91.3.2 8080 || reach b 10.91.3.2 8080; then echo "FAIL: an uplink reaches the workload"; exit 1; fi
+reach c 10.91.2.2 9090 || { echo "FAIL: the workload cannot reach out"; exit 1; }
+echo "both uplinks named: neither reaches the workload, its outbound traffic still works"
 echo "ALL CHECKS PASSED"
 INNER
-COPYFILE_DISABLE=1 tar --no-xattrs -C "$tmp" -cf - . | docker --context "$ctx" run --rm -i --cap-add NET_ADMIN debian:bookworm-slim \
+COPYFILE_DISABLE=1 tar --no-xattrs -C "$tmp" -cf - . | docker --context "$ctx" run --rm -i --privileged debian:bookworm-slim \
 	sh -c 'mkdir -p /t && tar -C /t -xf - && sh /t/run.sh'

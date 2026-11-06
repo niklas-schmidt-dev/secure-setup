@@ -60,6 +60,9 @@ type Options struct {
 	// Local runs the plan on this machine (`secure-setup here`) instead of
 	// over SSH. Plan.Local must be set too.
 	Local *localhost.Host
+	// Unattended means nobody answers prompts or opens links (`here --yes`,
+	// cloud-init). A local unattended run refuses the login-link join.
+	Unattended bool
 }
 
 // Result is what a successful run learned.
@@ -95,6 +98,9 @@ type Runner struct {
 	applyEpoch int64            // server clock when the rules went live
 	tsState    *remote.TSStatus
 	sshdPrev   string // the sshd drop-in an earlier run left; restored on failure
+
+	joined       bool // this run joined the tailnet
+	joinedByLink bool // a login link was shown and the tailnet is not yet known to be the operator's
 }
 
 type step struct {
@@ -356,14 +362,18 @@ func (r *Runner) server() remote.Host {
 	return r.pub
 }
 
-func (r *Runner) joinTailnet(ctx context.Context, log func(string)) error {
+func (r *Runner) joinTailnet(ctx context.Context, log func(string)) (err error) {
 	p := r.o.Plan
 	host := r.server()
 	key := p.Tailscale.AuthKey
 	if key == "" {
 		log("no auth key given: tailscale will print a login link")
+		// From here on, anyone who completes the link chooses the tailnet;
+		// every failure until it is verified logs the node out again.
+		r.joinedByLink = true
+		defer func() { err = r.leaveUnverifiedTailnet(host, err, log) }()
 	}
-	err := remote.TailscaleUp(ctx, host, remote.UpOptions{AuthKey: key, Hostname: p.Tailscale.Hostname, SSH: p.Tailscale.SSH}, log,
+	err = remote.TailscaleUp(ctx, host, remote.UpOptions{AuthKey: key, Hostname: p.Tailscale.Hostname}, log,
 		func(url string) {
 			r.attention(2, "Open this link in your browser to add the server to your tailnet:\n"+url)
 		})
@@ -384,11 +394,57 @@ func (r *Runner) joinTailnet(ctx context.Context, log func(string)) error {
 		}
 	}
 	r.result.DNSName = strings.TrimSuffix(st.Self.DNSName, ".")
-	log("joined as " + r.facts.TailscaleIPv4 + " (" + r.result.DNSName + ")")
-	return nil
+	r.joined = true
+	log("joined the tailnet " + st.Tailnet() + " as " + r.facts.TailscaleIPv4 + " (" + r.result.DNSName + ")")
+	if r.local == nil {
+		// Over SSH, reaching the node from this computer proves the tailnet
+		// (reachAdmin); Tailscale SSH waits until then.
+		return nil
+	}
+	if r.joinedByLink {
+		// Whoever completed the login link chose the tailnet.
+		ok, err := r.o.Prompt.Confirm(ctx, "Is "+st.Tailnet()+" your tailnet?",
+			"This machine joined the tailnet "+st.Tailnet()+" through the login link. Whoever owns that tailnet can reach this machine once the firewall is live. Choose No if it is not yours: the machine logs out of it again.")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("the tailnet " + st.Tailnet() + " is not yours")
+		}
+		r.joinedByLink = false
+	}
+	return r.enableTailscaleSSH(ctx, host, log)
 }
 
-func (r *Runner) reachAdmin(ctx context.Context, log func(string)) error {
+// leaveUnverifiedTailnet logs the node out after a failure while a login-link
+// join is not verified, so it does not stay in a tailnet someone else may
+// have chosen. It has its own context: a cancelled run still cleans up.
+func (r *Runner) leaveUnverifiedTailnet(host remote.Host, err error, log func(string)) error {
+	if err == nil || !r.joinedByLink {
+		return err
+	}
+	r.joinedByLink = false
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if lerr := remote.TailscaleLogout(ctx, host, log); lerr != nil {
+		return fmt.Errorf("%w; the login-link join was not verified and `tailscale logout` failed too (%v): run it on the server", err, lerr)
+	}
+	return fmt.Errorf("%w; the login-link join was not verified, so the server logged out of that tailnet again", err)
+}
+
+// enableTailscaleSSH turns Tailscale SSH on for a node this run joined, once
+// its tailnet is known to be the operator's.
+func (r *Runner) enableTailscaleSSH(ctx context.Context, host remote.Host, log func(string)) error {
+	if !r.joined || !r.o.Plan.Tailscale.SSH {
+		return nil
+	}
+	return remote.TailscaleSetSSH(ctx, host, log)
+}
+
+func (r *Runner) reachAdmin(ctx context.Context, log func(string)) (err error) {
+	// After a login-link join, only reaching the node from this computer
+	// shows the tailnet is the operator's; otherwise it leaves it again.
+	defer func() { err = r.leaveUnverifiedTailnet(r.pub, err, log) }()
 	p := r.o.Plan
 	addr := p.Tailscale.AdminAddress
 	if !p.Tailscale.UseExisting {
@@ -431,8 +487,9 @@ func (r *Runner) reachAdmin(ctx context.Context, log func(string)) error {
 		return err
 	}
 	r.admin = c
+	r.joinedByLink = false // reached from this computer: the tailnet is the operator's
 	log("private connection works; the rest of the setup uses it")
-	return nil
+	return r.enableTailscaleSSH(ctx, r.pub, log)
 }
 
 // dialAdminRetry keeps trying for up to wait; new tailnet nodes take a moment.
@@ -552,6 +609,26 @@ func (r *Runner) stageFirewall(ctx context.Context, log func(string)) error {
 	return r.stageFirewallOn(ctx, r.admin, log)
 }
 
+// extraWAN lists the other devices with a default route (an IPv6 uplink, a
+// second provider link): forwarded traffic from them is treated like the
+// internet, not like an internal bridge.
+func (r *Runner) extraWAN(log func(string)) []string {
+	var out []string
+	for _, n := range r.facts.WANIfaces {
+		switch n {
+		case r.o.Plan.Firewall.WANInterface:
+		case r.o.Plan.Tailscale.AdminInterface:
+			log("the admin interface " + n + " also has a default route; it stays trusted for forwarding")
+		default:
+			out = append(out, n)
+		}
+	}
+	if len(out) > 0 {
+		log("further internet-facing interfaces: " + strings.Join(out, ", ") + " (forwarded traffic from them is filtered like " + r.o.Plan.Firewall.WANInterface + ")")
+	}
+	return out
+}
+
 func (r *Runner) stageFirewallOn(ctx context.Context, host remote.Host, log func(string)) error {
 	p := r.o.Plan
 	elements := nftgen.RenderElements(nil, nil)
@@ -567,6 +644,7 @@ func (r *Runner) stageFirewallOn(ctx context.Context, host remote.Host, log func
 	ruleset, err := nftgen.Render(nftgen.Params{
 		AdminInterface:   p.Tailscale.AdminInterface,
 		WANInterface:     p.Firewall.WANInterface,
+		ExtraWAN:         r.extraWAN(log),
 		TailnetTCPPorts:  p.Firewall.TailnetPorts,
 		TailnetAll:       p.Firewall.TailnetAll,
 		WebPorts:         p.Firewall.WebPorts,

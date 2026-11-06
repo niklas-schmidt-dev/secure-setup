@@ -91,6 +91,9 @@ func (r *Runner) hereDetect(ctx context.Context, log func(string)) error {
 	if f.PkgMgr == "" {
 		return errors.New("no supported package manager found (apt-get, dnf, yum, pacman, zypper)")
 	}
+	if r.o.Unattended && !p.Tailscale.UseExisting && p.Tailscale.AuthKey == "" && f.TailscaleState != "Running" {
+		return errors.New("an unattended run cannot join the tailnet with a login link: nobody is there to open it, and anyone who reads the pending link could add this machine to their own tailnet. Set TS_AUTHKEY, or run `secure-setup here` in a terminal")
+	}
 	if err := resolveWAN(ctx, r.local, p, f, log); err != nil {
 		return err
 	}
