@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -403,5 +404,60 @@ func TestInstallBootCheck(t *testing.T) {
 	h = &recordHost{}
 	if err := ScheduleReboot(context.Background(), h, 15, nil); err != nil || !strings.Contains(h.all(), "systemd-run --quiet --unit=secure-setup-reboot --on-active=15") {
 		t.Fatalf("reboot: %v %s", err, h.all())
+	}
+}
+
+// The tunnel token only ever goes into its 0600 file: never into a script
+// or the unit's command line, which other users could read.
+func TestSetupTunnelKeepsTokenOffCommandLines(t *testing.T) {
+	const token = "eyJhIjoiYWNjb3VudCIsInQiOiJ0dW5uZWwiLCJzIjoic2VjcmV0In0="
+	h := &recordHost{output: func(cmd string) string {
+		if strings.Contains(cmd, "command -v cloudflared") {
+			return "/usr/local/bin/cloudflared"
+		}
+		return ""
+	}}
+	if err := SetupTunnel(context.Background(), h, token, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	unit := h.files[unitDir+TunnelUnit+".service"]
+	if h.files[TunnelTokenPath] != token+"\n" || !strings.Contains(unit, "ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:20241 run --token-file "+TunnelTokenPath) {
+		t.Fatalf("token file %q unit %q", h.files[TunnelTokenPath], unit)
+	}
+	if strings.Contains(unit, token) || strings.Contains(h.all(), token) {
+		t.Fatal("the token reached a script or the unit")
+	}
+	if !strings.Contains(h.all(), "/ready") || !strings.Contains(h.all(), "systemctl disable --now "+TunnelUnit) {
+		t.Fatal("setup does not wait for the tunnel connection, or leaves a failed tunnel running")
+	}
+}
+
+// installHost has no cloudflared yet.
+type installHost struct{ recordHost }
+
+func (h *installHost) Output(_ context.Context, cmd string) (string, error) {
+	if strings.Contains(cmd, "command -v cloudflared") {
+		return "", errors.New("exit status 1")
+	}
+	return "", nil
+}
+
+func TestInstallCloudflared(t *testing.T) {
+	for mgr, want := range map[string]string{
+		"apt-get": "https://pkg.cloudflare.com/cloudflared any main",
+		"dnf":     "https://pkg.cloudflare.com/cloudflared.repo",
+		"pacman":  "pacman -S --noconfirm --needed cloudflared",
+	} {
+		h := &installHost{}
+		if err := InstallCloudflared(context.Background(), h, &Facts{PkgMgr: mgr}, func(string) {}); err != nil || !strings.Contains(h.all(), want) {
+			t.Fatalf("%s: %v %s", mgr, err, h.all())
+		}
+	}
+	if err := InstallCloudflared(context.Background(), &installHost{}, &Facts{PkgMgr: "zypper"}, func(string) {}); err == nil {
+		t.Fatal("an unsupported package manager was accepted")
+	}
+	h := &recordHost{output: func(string) string { return "/usr/bin/cloudflared" }}
+	if err := InstallCloudflared(context.Background(), h, &Facts{PkgMgr: "apt-get"}, func(string) {}); err != nil || len(h.scripts) != 0 {
+		t.Fatalf("installed again: %v %q", err, h.scripts)
 	}
 }

@@ -100,6 +100,7 @@ type model struct {
 	tsAuthKey   string
 	tsSSH       bool
 	webChoice   string
+	tunnelToken string
 	extraPorts  string
 	allowPing   bool
 	harden      bool
@@ -140,7 +141,7 @@ func newModel(ctx context.Context, cancel context.CancelFunc, p *plan.Plan, vers
 		keyPath:    p.Server.KeyPath,
 		tsHostname: p.Tailscale.Hostname,
 		tsSSH:      p.Tailscale.SSH,
-		webChoice:  webChoiceFor(p.Firewall.WebPorts),
+		webChoice:  webChoiceFor(p.Firewall),
 		allowPing:  p.Firewall.AllowPing,
 		harden:     p.SSH.Harden,
 		rollback:   p.Firewall.RollbackSeconds,
@@ -166,9 +167,11 @@ func newModel(ctx context.Context, cancel context.CancelFunc, p *plan.Plan, vers
 	return m
 }
 
-func webChoiceFor(ports []int) string {
-	s := plan.FormatPorts(ports)
-	switch s {
+func webChoiceFor(f plan.Firewall) string {
+	if f.CloudflareTunnel {
+		return "tunnel"
+	}
+	switch plan.FormatPorts(f.WebPorts) {
 	case "80, 443":
 		return "both"
 	case "":
@@ -241,8 +244,9 @@ func (m *model) firewallForm() *huh.Form {
 		huh.NewNote().Title("Firewall").Description(note),
 		huh.NewSelect[string]().Title("Web traffic").
 			Options(
-				huh.NewOption("HTTPS (443) from Cloudflare only (recommended)", "https"),
-				huh.NewOption("HTTP (80) and HTTPS (443) from Cloudflare only", "both"),
+				huh.NewOption("HTTPS (443) from Cloudflare's IP ranges only (recommended)", "https"),
+				huh.NewOption("HTTP (80) and HTTPS (443) from Cloudflare's IP ranges only", "both"),
+				huh.NewOption("Cloudflare Tunnel: no open port at all (stronger protection)", "tunnel"),
 				huh.NewOption("No web traffic at all", "none"),
 			).Value(&m.webChoice),
 		huh.NewInput().Title("Extra ports reachable from the tailnet (optional)").
@@ -275,7 +279,13 @@ func (m *model) firewallForm() *huh.Form {
 	reboot := huh.NewConfirm().Title("Reboot at the end and check that everything comes back?").
 		Description("The real test that the rules, Tailscale and sshd survive a restart. Recommended.").
 		Affirmative("Yes").Negative("No").Value(&m.plan.Reboot)
-	return huh.NewForm(huh.NewGroup(fields...), huh.NewGroup(update, reboot)).WithShowHelp(true)
+	// Only for the tunnel: the token from the Cloudflare dashboard.
+	tunnel := huh.NewGroup(
+		huh.NewNote().Title("Cloudflare Tunnel").Description("cloudflared connects out to Cloudflare, so no web port is opened. Create a tunnel in the Cloudflare dashboard (Networks > Tunnels), route your hostname to the local service there (for example http://localhost:8080), and paste the token from its install command."),
+		huh.NewInput().Title("Tunnel token").Description("Leave empty on a rerun to keep the stored token.").
+			EchoMode(huh.EchoModePassword).Value(&m.tunnelToken),
+	).WithHideFunc(func() bool { return m.webChoice != "tunnel" })
+	return huh.NewForm(huh.NewGroup(fields...), tunnel, huh.NewGroup(update, reboot)).WithShowHelp(true)
 }
 
 func (m *model) reviewForm() *huh.Form {
@@ -310,10 +320,13 @@ func (m *model) summary() string {
 		line("", "Tailscale SSH enabled")
 	}
 	line("SSH", "TCP "+plan.FormatPorts(p.Firewall.TailnetPorts)+" on "+p.Tailscale.AdminInterface+" only")
-	if len(p.Firewall.WebPorts) > 0 {
+	switch {
+	case p.Firewall.CloudflareTunnel:
+		line("Web", "through a Cloudflare Tunnel; no web port opened")
+	case len(p.Firewall.WebPorts) > 0:
 		line("Web", "TCP "+plan.FormatPorts(p.Firewall.WebPorts)+" on "+p.Firewall.WANInterface+", Cloudflare only")
 		line("", "ranges refreshed daily")
-	} else {
+	default:
 		line("Web", "none")
 	}
 	line("Ping", yesNo(p.Firewall.AllowPing))
@@ -549,6 +562,10 @@ func (m *model) advance() (tea.Model, tea.Cmd) {
 			p.Firewall.WebPorts = []int{80, 443}
 		default:
 			p.Firewall.WebPorts = nil
+		}
+		p.Firewall.CloudflareTunnel = m.webChoice == "tunnel"
+		if p.Firewall.CloudflareTunnel && m.tunnelToken != "" {
+			p.Firewall.TunnelToken = m.tunnelToken
 		}
 		p.Firewall.CloudflareSync = len(p.Firewall.WebPorts) > 0
 		extra, _ := plan.ParsePorts(m.extraPorts)
@@ -845,7 +862,9 @@ func Summary(p *plan.Plan, r *runner.Result) string {
 	if r.Local {
 		public = r.PublicAddress
 	}
-	if len(r.WebPorts) > 0 {
+	if r.Tunnel {
+		line("Web", "through the Cloudflare Tunnel; no web port is open. Route hostnames in the Cloudflare dashboard")
+	} else if len(r.WebPorts) > 0 {
 		where := ""
 		if public != "" {
 			where = "; point a proxied DNS record at " + public

@@ -64,7 +64,9 @@ including forced lockouts, and check that the server comes back.
   0600 in a 0700 directory before any byte is written. Text the server
   returns is stripped of terminal control characters before it is shown.
 - Cloudflare's IP ranges are shared by every Cloudflare customer. Enable
-  Authenticated Origin Pulls or use Cloudflare Tunnel if that matters to you.
+  Authenticated Origin Pulls, or choose the Cloudflare Tunnel option, which
+  opens no web port at all. Its token is stored mode 0600 and passed to
+  cloudflared as a file, never on a command line.
 - UDP 41641 is open to the world for direct Tailscale connections. That port
   only speaks authenticated WireGuard.
 - Your existing SSH session survives the firewall change (conntrack). That is

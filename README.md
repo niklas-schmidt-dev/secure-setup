@@ -22,7 +22,8 @@ Either way the guided wizard:
    login link it checks that the tailnet is yours before going on)
 3. switches SSH to keys only, after installing and verifying your key
 4. installs an nftables firewall: SSH only over the tailnet, HTTPS only from
-   Cloudflare's published ranges, everything else dropped
+   Cloudflare's published ranges (or, for stronger protection, no web port at
+   all behind a Cloudflare Tunnel), everything else dropped
 5. applies the rules with a rollback timer, confirms them over a fresh
    tailnet connection, and only then makes them permanent
 6. verifies from your machine that a new connection to the public SSH port is
@@ -212,10 +213,25 @@ non-zero. The server is in its previous state.
 - **Your existing SSH session stays up** while the firewall changes. That is
   conntrack keeping an established flow. A new connection to the public port
   is what gets blocked, and that is what the final step tests.
-- **Web traffic**: Cloudflare must proxy your DNS record (orange cloud). Set the
-  SSL mode to Full (strict) and consider Cloudflare's Authenticated Origin
-  Pulls so only your zone's traffic, not any Cloudflare customer's, reaches the
-  origin. Cloudflare Tunnel is an alternative that needs no open port at all.
+- **Web traffic, two levels**:
+  - *Cloudflare's IP ranges* (default): TCP 443 (and 80 if chosen) is open
+    only to Cloudflare. Cloudflare must proxy your DNS record (orange cloud);
+    set the SSL mode to Full (strict). The ranges are shared by every
+    Cloudflare customer, so consider Authenticated Origin Pulls so only your
+    zone's traffic reaches the origin.
+  - *Cloudflare Tunnel* (stronger protection): no web port is opened at all.
+    cloudflared connects out to Cloudflare and brings your traffic in through
+    that connection. Create a tunnel in the Cloudflare dashboard (Networks >
+    Tunnels), route your hostname to the local service there (for example
+    `http://localhost:8080`), and give secure-setup the token from its
+    install command: in the wizard, or as `CLOUDFLARE_TUNNEL_TOKEN` with
+    `"cloudflare_tunnel": true` in a plan. secure-setup installs cloudflared
+    from Cloudflare's package repository, keeps the token in
+    `/etc/secure-setup/cloudflared.token` (mode 0600, read with
+    `--token-file`, never on a command line) and runs
+    `secure-setup-cloudflared.service`. The run only goes on to the firewall
+    once the tunnel is connected, and the reboot check expects it to
+    reconnect.
 - **Docker**: containers can reach out as usual. Published ports are reachable
   from the tailnet and, from the internet, only through Cloudflare on the web
   ports. Docker's own iptables rules stay; both rulesets must accept a packet.

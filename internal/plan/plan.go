@@ -77,6 +77,11 @@ type Firewall struct {
 	// interface of the server's default route.
 	WANOverride    bool `json:"wan_interface_override,omitempty"`
 	CloudflareSync bool `json:"cloudflare_sync"`
+	// CloudflareTunnel serves the web through a Cloudflare Tunnel instead of
+	// an open port: cloudflared connects out, nothing listens in. It
+	// replaces WebPorts. The token comes from CLOUDFLARE_TUNNEL_TOKEN.
+	CloudflareTunnel bool   `json:"cloudflare_tunnel,omitempty"`
+	TunnelToken      string `json:"-"`
 	// ConfirmBy applies to local runs only: "login" (default) or "self".
 	ConfirmBy string `json:"confirm_by,omitempty"`
 }
@@ -148,6 +153,9 @@ func (p *Plan) Validate() error {
 	}
 	if p.Firewall.RollbackSeconds < 30 || p.Firewall.RollbackSeconds > 900 {
 		errs = append(errs, fmt.Errorf("rollback window must be between 30 and 900 seconds, got %d", p.Firewall.RollbackSeconds))
+	}
+	if p.Firewall.CloudflareTunnel && len(p.Firewall.WebPorts) > 0 {
+		errs = append(errs, errors.New("cloudflare_tunnel replaces web_ports: with a tunnel no web port is opened, so leave web_ports empty"))
 	}
 	if len(p.Firewall.WebPorts) == 0 && p.Firewall.CloudflareSync {
 		p.Firewall.CloudflareSync = false

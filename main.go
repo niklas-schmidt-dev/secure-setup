@@ -87,7 +87,7 @@ On the server itself:
   secure-setup render -f plan.json  print the nftables ruleset a plan produces
 
 Secrets are read from the environment in non-interactive mode:
-  SECURE_SETUP_PASSWORD, SECURE_SETUP_PASSPHRASE, TS_AUTHKEY
+  SECURE_SETUP_PASSWORD, SECURE_SETUP_PASSPHRASE, TS_AUTHKEY, CLOUDFLARE_TUNNEL_TOKEN
 `)
 }
 
@@ -113,6 +113,7 @@ func cmdHere(ctx context.Context, args []string) error {
 	p.Local = true
 	p.Server.User = localhost.LoginUser()
 	p.Tailscale.AuthKey = os.Getenv("TS_AUTHKEY")
+	p.Firewall.TunnelToken = os.Getenv("CLOUDFLARE_TUNNEL_TOKEN")
 	interactive := term.IsTerminal(int(os.Stdin.Fd())) && !*yes
 	switch {
 	case *confirm != "":
@@ -207,6 +208,7 @@ func cmdApply(ctx context.Context, args []string) error {
 	p.Server.Password = os.Getenv("SECURE_SETUP_PASSWORD")
 	p.Server.Passphrase = os.Getenv("SECURE_SETUP_PASSPHRASE")
 	p.Tailscale.AuthKey = os.Getenv("TS_AUTHKEY")
+	p.Firewall.TunnelToken = os.Getenv("CLOUDFLARE_TUNNEL_TOKEN")
 	if p.Local {
 		host, err := localhost.New(ctx)
 		if err != nil {
@@ -257,7 +259,11 @@ func describe(p *plan.Plan) string {
 		fmt.Fprintf(&b, "  tailscale       install and join (hostname %q)\n", p.Tailscale.Hostname)
 	}
 	fmt.Fprintf(&b, "  tailnet ports   TCP %s\n", plan.FormatPorts(p.Firewall.TailnetPorts))
-	fmt.Fprintf(&b, "  web ports       TCP %s from Cloudflare\n", orNone(plan.FormatPorts(p.Firewall.WebPorts)))
+	if p.Firewall.CloudflareTunnel {
+		fmt.Fprintf(&b, "  web             Cloudflare Tunnel, no web port opened\n")
+	} else {
+		fmt.Fprintf(&b, "  web ports       TCP %s from Cloudflare\n", orNone(plan.FormatPorts(p.Firewall.WebPorts)))
+	}
 	fmt.Fprintf(&b, "  ping            %v\n", p.Firewall.AllowPing)
 	fmt.Fprintf(&b, "  sshd keys only  %v\n", p.SSH.Harden)
 	fmt.Fprintf(&b, "  system update   %v\n", p.UpdateSystem)
@@ -343,6 +349,12 @@ if [ -e /var/lib/secure-setup/firewalld-retired ]; then
 	echo "firewalld unmasked; it was in use before secure-setup: start it again with: systemctl enable --now firewalld"
 fi
 systemctl disable secure-setup-bootcheck.service >/dev/null 2>&1 || true
+if [ -f /etc/systemd/system/secure-setup-cloudflared.service ]; then
+	systemctl disable --now secure-setup-cloudflared.service >/dev/null 2>&1 || true
+	rm -f /etc/systemd/system/secure-setup-cloudflared.service
+	systemctl daemon-reload
+	echo "Cloudflare Tunnel service removed (cloudflared stays installed; delete the tunnel in the Cloudflare dashboard if you no longer need it)"
+fi
 rm -f /etc/systemd/system/secure-setup-bootcheck.service /etc/motd.d/secure-setup
 rm -rf /etc/secure-setup /var/lib/secure-setup
 if [ -f /etc/ssh/sshd_config.d/00-secure-setup.conf ] || grep -q '^# secure-setup: added the next line$' /etc/ssh/sshd_config 2>/dev/null; then

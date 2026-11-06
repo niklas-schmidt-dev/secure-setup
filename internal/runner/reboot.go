@@ -21,6 +21,7 @@ type BootExpect struct {
 	Tailscale    bool   `json:"tailscale"`
 	TailscaleSSH bool   `json:"tailscale_ssh"`
 	Hardened     bool   `json:"hardened"`
+	Tunnel       bool   `json:"tunnel,omitempty"`
 	User         string `json:"user"`
 	AdminAddress string `json:"admin_address"`
 	SSHPort      int    `json:"ssh_port"`
@@ -35,6 +36,7 @@ func (r *Runner) bootExpect(ctx context.Context, host remote.Host) BootExpect {
 	e := BootExpect{
 		Tailscale:    !p.Tailscale.UseExisting,
 		Hardened:     r.result.Hardened,
+		Tunnel:       r.result.Tunnel,
 		User:         user,
 		AdminAddress: r.result.AdminAddress,
 		SSHPort:      r.facts.SSHPort,
@@ -73,7 +75,25 @@ func CheckLockdown(ctx context.Context, host remote.Host, e BootExpect) []string
 			problems = append(problems, shortErr(err))
 		}
 	}
+	if e.Tunnel && !remote.TunnelReady(ctx, host) {
+		problems = append(problems, "the Cloudflare Tunnel is not connected")
+	}
 	return problems
+}
+
+// checkUntil repeats CheckLockdown for up to wait: services such as
+// Tailscale and cloudflared need a moment after a boot.
+func checkUntil(ctx context.Context, host remote.Host, e BootExpect, wait time.Duration) ([]string, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		problems := CheckLockdown(ctx, host, e)
+		if len(problems) == 0 || time.Now().After(deadline) {
+			return problems, nil
+		}
+		if err := sleepCtx(ctx, 5*time.Second); err != nil {
+			return problems, err
+		}
+	}
 }
 
 func onOff(b bool) string {
@@ -153,7 +173,10 @@ func (r *Runner) rebootAndCheck(ctx context.Context, log func(string)) error {
 		break
 	}
 	log("the server rebooted and is reachable over the private network again")
-	problems := CheckLockdown(ctx, r.admin, expect)
+	problems, err := checkUntil(ctx, r.admin, expect, time.Minute)
+	if err != nil {
+		return err
+	}
 	if r.result.PublicSSHClosed {
 		if open, _ := r.publicSSHOpen(ctx); open {
 			problems = append(problems, "a new connection to "+r.o.Plan.Address()+" succeeds again")
@@ -164,7 +187,7 @@ func (r *Runner) rebootAndCheck(ctx context.Context, log func(string)) error {
 	}
 	r.result.RebootChecked = true
 	r.result.RebootNeeded = false
-	log("after the reboot: rules loaded, nftables enabled at boot, " + map[bool]string{true: "Tailscale running, ", false: ""}[expect.Tailscale] + map[bool]string{true: "sshd keys only, ", false: ""}[expect.Hardened] + "public SSH blocked")
+	log("after the reboot: rules loaded, nftables enabled at boot, " + map[bool]string{true: "Tailscale running, ", false: ""}[expect.Tailscale] + map[bool]string{true: "sshd keys only, ", false: ""}[expect.Hardened] + map[bool]string{true: "Cloudflare Tunnel connected, ", false: ""}[expect.Tunnel] + "public SSH blocked")
 	return nil
 }
 
@@ -207,16 +230,9 @@ func BootCheck(ctx context.Context, host remote.Host) (string, error) {
 	if err := json.Unmarshal(data, &e); err != nil {
 		return "", fmt.Errorf("parse %s: %w", bootCheckExpectPath, err)
 	}
-	deadline := time.Now().Add(bootCheckWait)
-	var problems []string
-	for {
-		problems = CheckLockdown(ctx, host, e)
-		if len(problems) == 0 || time.Now().After(deadline) {
-			break
-		}
-		if err := sleepCtx(ctx, 5*time.Second); err != nil {
-			return "", err
-		}
+	problems, err := checkUntil(ctx, host, e, bootCheckWait)
+	if err != nil {
+		return "", err
 	}
 	msg := "secure-setup: after the reboot (" + time.Now().UTC().Format(time.RFC3339) + "): "
 	if len(problems) == 0 {
@@ -226,6 +242,9 @@ func BootCheck(ctx context.Context, host remote.Host) (string, error) {
 		}
 		if e.Hardened {
 			msg += ", sshd keys only"
+		}
+		if e.Tunnel {
+			msg += ", Cloudflare Tunnel connected"
 		}
 	} else {
 		msg += "PROBLEMS: " + strings.Join(problems, "; ")
