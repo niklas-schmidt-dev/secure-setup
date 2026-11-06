@@ -1,0 +1,11 @@
+[Unit]
+Description=secure-setup: daily Cloudflare IP range refresh
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=24h
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

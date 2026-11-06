@@ -1,0 +1,46 @@
+# Release pipeline. Runs in GitHub Actions on every v* tag (.github/workflows/release.yml).
+version: 2
+
+project_name: secure-setup
+
+builds:
+  - id: secure-setup
+    main: .
+    binary: secure-setup
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    # No version in the name so install.sh can use the releases/latest/download URL.
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  use: github
+  sort: asc
+
+release:
+  github:
+    owner: niklas-schmidt-dev
+    name: secure-setup
+  prerelease: auto

@@ -1,0 +1,12 @@
+# Throwaway "VPS": Debian with systemd and sshd, used by test/e2e/run.sh.
+FROM debian:bookworm
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends systemd systemd-sysv dbus openssh-server iproute2 ca-certificates curl procps \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /run/sshd /root/.ssh && chmod 700 /root/.ssh \
+ && sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
+ && systemctl enable ssh \
+ && systemctl mask systemd-logind getty@tty1 console-getty
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

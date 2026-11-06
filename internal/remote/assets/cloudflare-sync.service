@@ -1,0 +1,8 @@
+[Unit]
+Description=secure-setup: refresh Cloudflare IP ranges in nftables
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/secure-setup-cloudflare-sync
