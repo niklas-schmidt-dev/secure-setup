@@ -13,18 +13,23 @@ import (
 
 // TSStatus is the subset of `tailscale status --json` we read.
 type TSStatus struct {
-	BackendState   string `json:"BackendState"`
-	MagicDNSSuffix string `json:"MagicDNSSuffix"`
-	Self           struct {
-		HostName     string   `json:"HostName"`
-		DNSName      string   `json:"DNSName"`
-		TailscaleIPs []string `json:"TailscaleIPs"`
-		Online       bool     `json:"Online"`
-	} `json:"Self"`
+	BackendState   string            `json:"BackendState"`
+	MagicDNSSuffix string            `json:"MagicDNSSuffix"`
+	Health         []string          `json:"Health"`
+	Self           TSNode            `json:"Self"`
+	Peer           map[string]TSNode `json:"Peer"`
+}
+
+// TSNode is one node in `tailscale status --json`.
+type TSNode struct {
+	HostName     string   `json:"HostName"`
+	DNSName      string   `json:"DNSName"`
+	TailscaleIPs []string `json:"TailscaleIPs"`
+	Online       bool     `json:"Online"`
 }
 
 // TailscaleStatus reads the node state. It fails when tailscaled is not running.
-func TailscaleStatus(ctx context.Context, c *sshx.Client) (*TSStatus, error) {
+func TailscaleStatus(ctx context.Context, c Host) (*TSStatus, error) {
 	out, err := c.Output(ctx, "tailscale status --json")
 	if err != nil {
 		return nil, err
@@ -37,7 +42,7 @@ func TailscaleStatus(ctx context.Context, c *sshx.Client) (*TSStatus, error) {
 }
 
 // TailscaleIPv4 returns the node's 100.x address.
-func TailscaleIPv4(ctx context.Context, c *sshx.Client) (string, error) {
+func TailscaleIPv4(ctx context.Context, c Host) (string, error) {
 	out, err := c.Output(ctx, "tailscale ip -4")
 	if err != nil {
 		return "", err
@@ -50,7 +55,7 @@ func TailscaleIPv4(ctx context.Context, c *sshx.Client) (string, error) {
 }
 
 // InterfaceExists checks for a network interface by name.
-func InterfaceExists(ctx context.Context, c *sshx.Client, name string) bool {
+func InterfaceExists(ctx context.Context, c Host, name string) bool {
 	_, err := c.Output(ctx, "ip -o link show "+sshx.Quote(name))
 	return err == nil
 }
@@ -72,7 +77,7 @@ echo "tailscaled: $(systemctl is-active tailscaled)"
 
 // InstallTailscale installs the package via Tailscale's official installer
 // and starts tailscaled.
-func InstallTailscale(ctx context.Context, c *sshx.Client, f *Facts, onLine func(string)) error {
+func InstallTailscale(ctx context.Context, c Host, f *Facts, onLine func(string)) error {
 	if err := InstallPackages(ctx, c, f, onLine, "curl", "ca-certificates"); err != nil {
 		return err
 	}
@@ -94,7 +99,7 @@ var loginURLRe = regexp.MustCompile(`https://login\.tailscale\.com/\S+`)
 
 // TailscaleUp connects the node. Without an auth key it reports the login URL
 // through onURL and waits until the user has authenticated.
-func TailscaleUp(ctx context.Context, c *sshx.Client, o UpOptions, onLine func(string), onURL func(string)) error {
+func TailscaleUp(ctx context.Context, c Host, o UpOptions, onLine func(string), onURL func(string)) error {
 	args := []string{"tailscale", "up", "--timeout=15m"}
 	if o.Hostname != "" {
 		args = append(args, "--hostname="+sshx.Quote(o.Hostname))
@@ -131,4 +136,40 @@ func TailscaleUp(ctx context.Context, c *sshx.Client, o UpOptions, onLine func(s
 		return fmt.Errorf("tailscale up: %w", err)
 	}
 	return nil
+}
+
+// TailscalePingPeer pings one online peer over the tailnet and reports the
+// path it took. It returns ok=false with a reason when no online peer exists.
+func TailscalePingPeer(ctx context.Context, c Host, st *TSStatus) (ok bool, detail string, err error) {
+	var peer *TSNode
+	for _, n := range st.Peer {
+		if n.Online && len(n.TailscaleIPs) > 0 {
+			n := n
+			if peer == nil || n.HostName < peer.HostName {
+				peer = &n
+			}
+		}
+	}
+	if peer == nil {
+		return false, "no other tailnet device is online to ping", nil
+	}
+	ip := ""
+	for _, a := range peer.TailscaleIPs {
+		if !strings.Contains(a, ":") {
+			ip = a
+			break
+		}
+	}
+	if ip == "" {
+		ip = peer.TailscaleIPs[0]
+	}
+	out, err := c.Output(ctx, "tailscale ping --c 3 --timeout 5s --until-direct=false "+sshx.Quote(ip))
+	if err != nil {
+		return false, "", fmt.Errorf("tailscale ping %s (%s): %w", peer.HostName, ip, err)
+	}
+	last := out
+	if i := strings.LastIndexByte(strings.TrimSpace(out), '\n'); i >= 0 {
+		last = strings.TrimSpace(out)[i+1:]
+	}
+	return true, peer.HostName + ": " + strings.TrimSpace(last), nil
 }

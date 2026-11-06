@@ -43,8 +43,8 @@ table inet secure_setup {
 		# Tailscale: direct WireGuard connections (authenticated; relays are used otherwise)
 		udp dport 41641 accept
 
-		# Administration: only over the tailnet
-		iifname "tailscale0" accept
+		# Administration: only over the tailnet (the counter shows new connections through this rule)
+		iifname "tailscale0" counter accept
 	}
 
 	chain forward {

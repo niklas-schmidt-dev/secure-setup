@@ -17,11 +17,25 @@ import (
 
 // Plan is the full answer set of the wizard.
 type Plan struct {
+	// Local means the plan is applied on the machine secure-setup runs on
+	// (`secure-setup here`); Server is then unused.
+	Local     bool      `json:"local,omitempty"`
 	Server    Server    `json:"server"`
 	Tailscale Tailscale `json:"tailscale"`
 	Firewall  Firewall  `json:"firewall"`
 	SSH       SSH       `json:"ssh"`
 }
+
+// Confirmation modes for a local run.
+const (
+	// ConfirmLogin waits for a new SSH login over the private network (or
+	// `secure-setup confirm` in such a session) before the rules are kept.
+	ConfirmLogin = "login"
+	// ConfirmSelf keeps the rules after self-checks: tailscale is running,
+	// the interface and listener exist, a tailnet peer answers a ping.
+	// For unattended runs (cloud-init) where nobody can log in.
+	ConfirmSelf = "self"
+)
 
 // Server is how we reach the machine today, over its public address.
 type Server struct {
@@ -55,6 +69,8 @@ type Firewall struct {
 	RollbackSeconds int    `json:"rollback_seconds"`
 	WANInterface    string `json:"wan_interface,omitempty"`
 	CloudflareSync  bool   `json:"cloudflare_sync"`
+	// ConfirmBy applies to local runs only: "login" (default) or "self".
+	ConfirmBy string `json:"confirm_by,omitempty"`
 }
 
 // SSH covers sshd hardening and key handling.
@@ -87,16 +103,24 @@ var hostRe = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
 // the user out.
 func (p *Plan) Validate() error {
 	var errs []error
-	if p.Server.Host == "" {
-		errs = append(errs, errors.New("server host is required"))
-	} else if net.ParseIP(p.Server.Host) == nil && !hostRe.MatchString(p.Server.Host) {
-		errs = append(errs, fmt.Errorf("server host %q is not a hostname or IP address", p.Server.Host))
-	}
-	if p.Server.Port < 1 || p.Server.Port > 65535 {
-		errs = append(errs, fmt.Errorf("server port %d is out of range", p.Server.Port))
-	}
-	if p.Server.User == "" {
-		errs = append(errs, errors.New("server user is required"))
+	if p.Local {
+		switch p.Firewall.ConfirmBy {
+		case "", ConfirmLogin, ConfirmSelf:
+		default:
+			errs = append(errs, fmt.Errorf("confirm_by must be %q or %q, got %q", ConfirmLogin, ConfirmSelf, p.Firewall.ConfirmBy))
+		}
+	} else {
+		if p.Server.Host == "" {
+			errs = append(errs, errors.New("server host is required"))
+		} else if net.ParseIP(p.Server.Host) == nil && !hostRe.MatchString(p.Server.Host) {
+			errs = append(errs, fmt.Errorf("server host %q is not a hostname or IP address", p.Server.Host))
+		}
+		if p.Server.Port < 1 || p.Server.Port > 65535 {
+			errs = append(errs, fmt.Errorf("server port %d is out of range", p.Server.Port))
+		}
+		if p.Server.User == "" {
+			errs = append(errs, errors.New("server user is required"))
+		}
 	}
 	if p.Tailscale.AdminInterface == "" {
 		errs = append(errs, errors.New("admin interface is required"))
@@ -153,6 +177,9 @@ func (p Plan) Save(path string) error {
 	}
 	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
+
+// LocalSavePath is where `secure-setup here` stores its plan.
+const LocalSavePath = "/etc/secure-setup/plan.json"
 
 // DefaultSavePath is where the wizard stores the plan for replay.
 func DefaultSavePath(host string) string {

@@ -11,13 +11,13 @@ import (
 const dropInPath = "/etc/ssh/sshd_config.d/00-secure-setup.conf"
 
 // AuthorizedKeys returns the user's current authorized_keys content.
-func AuthorizedKeys(ctx context.Context, c *sshx.Client, user string) (string, error) {
+func AuthorizedKeys(ctx context.Context, c Host, user string) (string, error) {
 	script := fmt.Sprintf(`home=$(getent passwd %s | cut -d: -f6); cat "$home/.ssh/authorized_keys" 2>/dev/null || true`, sshx.Quote(user))
 	return c.Output(ctx, script)
 }
 
 // AddAuthorizedKey appends one public key line for user.
-func AddAuthorizedKey(ctx context.Context, c *sshx.Client, user, line string, onLine func(string)) error {
+func AddAuthorizedKey(ctx context.Context, c Host, user, line string, onLine func(string)) error {
 	script := fmt.Sprintf(`
 user=%s
 home=$(getent passwd "$user" | cut -d: -f6)
@@ -51,7 +51,7 @@ systemctl reload-or-restart ssh 2>/dev/null || systemctl reload-or-restart sshd
 `
 
 // HardenSSHD installs the key-only drop-in and reloads sshd.
-func HardenSSHD(ctx context.Context, c *sshx.Client, onLine func(string)) error {
+func HardenSSHD(ctx context.Context, c Host, onLine func(string)) error {
 	if err := c.WriteFile(ctx, dropInPath, []byte(asset("sshd-hardening.conf")), "0644"); err != nil {
 		return err
 	}
@@ -63,7 +63,7 @@ func HardenSSHD(ctx context.Context, c *sshx.Client, onLine func(string)) error 
 }
 
 // RevertSSHD removes the drop-in again and reloads sshd.
-func RevertSSHD(ctx context.Context, c *sshx.Client, onLine func(string)) error {
+func RevertSSHD(ctx context.Context, c Host, onLine func(string)) error {
 	script := "rm -f " + dropInPath + "\nsystemctl reload-or-restart ssh 2>/dev/null || systemctl reload-or-restart sshd\necho \"removed " + dropInPath + "\""
 	if err := c.Script(ctx, script, onLine); err != nil {
 		return fmt.Errorf("revert sshd hardening: %w", err)

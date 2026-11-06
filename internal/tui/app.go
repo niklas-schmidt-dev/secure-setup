@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/niklas-schmidt-dev/secure-setup/internal/localhost"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/plan"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/remote"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/runner"
@@ -46,9 +47,24 @@ const (
 
 // Run starts the wizard and blocks until it ends.
 func Run(ctx context.Context, p *plan.Plan, version string) error {
+	return run(ctx, p, version, nil)
+}
+
+// RunHere starts the wizard for this machine (`secure-setup here`): no
+// connection questions, the rest is the same.
+func RunHere(ctx context.Context, p *plan.Plan, version string, host *localhost.Host) error {
+	return run(ctx, p, version, host)
+}
+
+func run(ctx context.Context, p *plan.Plan, version string, local *localhost.Host) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	m := newModel(ctx, cancel, p, version)
+	if local != nil {
+		m.local = local
+		m.phase = phasePreflight
+		m.form = nil
+	}
 	prog := tea.NewProgram(m, tea.WithContext(ctx), tea.WithAltScreen())
 	m.send = prog.Send
 	final, err := prog.Run()
@@ -67,6 +83,7 @@ type model struct {
 	send    func(tea.Msg)
 	version string
 	plan    *plan.Plan
+	local   *localhost.Host // set for `secure-setup here`
 
 	phase  phase
 	width  int
@@ -87,6 +104,7 @@ type model struct {
 	allowPing   bool
 	harden      bool
 	rollback    int
+	confirmBy   string
 	confirmed   bool
 	preflightOK bool
 
@@ -126,12 +144,25 @@ func newModel(ctx context.Context, cancel context.CancelFunc, p *plan.Plan, vers
 		allowPing:  p.Firewall.AllowPing,
 		harden:     p.SSH.Harden,
 		rollback:   p.Firewall.RollbackSeconds,
+		confirmBy:  p.Firewall.ConfirmBy,
 		width:      80,
 		height:     24,
 	}
 	m.spin = spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(lipgloss.NewStyle().Foreground(colorAccent)))
 	m.vp = viewport.New(78, 10)
 	m.form = m.connectForm()
+	if m.confirmBy == "" {
+		m.confirmBy = plan.ConfirmLogin
+	}
+	if len(p.Firewall.TailnetPorts) > 0 {
+		var extra []int
+		for _, port := range p.Firewall.TailnetPorts {
+			if port != 22 {
+				extra = append(extra, port)
+			}
+		}
+		m.extraPorts = plan.FormatPorts(extra)
+	}
 	return m
 }
 
@@ -183,8 +214,12 @@ func (m *model) tailscaleForm() *huh.Form {
 	if m.tsHostname == "" {
 		m.tsHostname = f.Hostname
 	}
+	target := "this server"
+	if m.local != nil {
+		target = "this machine"
+	}
 	fields := []huh.Field{
-		huh.NewNote().Title("Tailscale").Description(desc + "\nThe tailnet becomes the only way to administer this server."),
+		huh.NewNote().Title("Tailscale").Description(desc + "\nThe tailnet becomes the only way to administer " + target + "."),
 		huh.NewInput().Title("Name in the tailnet").Value(&m.tsHostname).Validate(validateHost),
 		huh.NewInput().Title("Auth key (optional)").
 			Description("From https://login.tailscale.com/admin/settings/keys. Leave empty to approve the server with a login link instead.").
@@ -225,6 +260,14 @@ func (m *model) firewallForm() *huh.Form {
 				huh.NewOption("5 minutes", 300),
 			).Value(&m.rollback),
 	}
+	if m.local != nil {
+		fields = append(fields, huh.NewSelect[string]().Title("How to confirm the new rules").
+			Description("A login from another device proves they let you in. Self-checks are for unattended setups where nobody can log in.").
+			Options(
+				huh.NewOption("I log in over the tailnet from another device (recommended)", plan.ConfirmLogin),
+				huh.NewOption("Self-checks only (unattended)", plan.ConfirmSelf),
+			).Value(&m.confirmBy))
+	}
 	return huh.NewForm(huh.NewGroup(fields...)).WithShowHelp(true)
 }
 
@@ -240,9 +283,15 @@ func (m *model) summary() string {
 	f := m.facts
 	var b strings.Builder
 	line := func(k, v string) { fmt.Fprintf(&b, "%-17s %s\n", k, v) }
-	line("Server", p.Address())
-	line("", f.PrettyName+", host "+f.Hostname)
+	if m.local != nil {
+		line("Server", "this machine, host "+f.Hostname)
+	} else {
+		line("Server", p.Address())
+	}
+	line("", f.PrettyName)
 	switch {
+	case p.Tailscale.UseExisting:
+		line("Private network", p.Tailscale.AdminAddress+" on "+p.Tailscale.AdminInterface+" (no Tailscale)")
 	case f.TailscaleState == "Running":
 		line("Tailscale", "already connected as "+f.TailscaleIPv4)
 	case p.Tailscale.AuthKey != "":
@@ -264,6 +313,9 @@ func (m *model) summary() string {
 	line("Password login", map[bool]string{true: "disabled (keys only)", false: "unchanged"}[p.SSH.Harden])
 	line("Everything else", "dropped")
 	line("Rollback window", fmt.Sprintf("%d seconds", p.Firewall.RollbackSeconds))
+	if m.local != nil {
+		line("Confirmation", map[string]string{plan.ConfirmSelf: "self-checks (unattended)"}[p.Firewall.ConfirmBy]+map[string]string{plan.ConfirmLogin: "a new login from another device"}[p.Firewall.ConfirmBy])
+	}
 	if m.savedPath != "" {
 		line("Plan saved to", shortenHome(m.savedPath))
 	}
@@ -334,12 +386,18 @@ type runDoneMsg struct {
 // ---- tea.Model ----
 
 func (m *model) Init() tea.Cmd {
+	if m.local != nil {
+		return tea.Batch(m.spin.Tick, m.preflight())
+	}
 	return tea.Batch(m.form.Init(), m.spin.Tick)
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		if msg.Width <= 0 || msg.Height <= 0 {
+			return m, nil // unknown size (some ptys); keep the defaults
+		}
 		m.width, m.height = msg.Width, msg.Height
 		m.vp.Width = clamp(m.width-4, 20, 160)
 		m.vp.Height = clamp(m.height-len(m.steps)-12, 4, 30)
@@ -381,6 +439,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case preflightMsg:
 		if msg.err != nil {
+			if m.local != nil {
+				m.runErr = msg.err
+				m.cancel()
+				return m, tea.Quit
+			}
 			m.err = msg.err
 			m.phase = phaseConnect
 			m.form = m.connectForm()
@@ -388,7 +451,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.facts = msg.facts
 		m.err = nil
-		if m.facts.TailscaleState == "Running" {
+		if m.facts.TailscaleState == "Running" || m.plan.Tailscale.UseExisting {
 			m.phase = phaseFirewall
 			m.form = m.firewallForm()
 		} else {
@@ -486,12 +549,18 @@ func (m *model) advance() (tea.Model, tea.Cmd) {
 		p.Firewall.WANInterface = m.facts.WANIface
 		p.SSH.Harden = m.harden
 		p.SSH.AddLocalKey = m.harden
+		if m.local != nil {
+			p.Firewall.ConfirmBy = m.confirmBy
+		}
 		if err := p.Validate(); err != nil {
 			m.err = err
 			m.form = m.firewallForm()
 			return m, m.form.Init()
 		}
 		m.savedPath = plan.DefaultSavePath(p.Server.Host)
+		if m.local != nil {
+			m.savedPath = plan.LocalSavePath
+		}
 		if err := p.Save(m.savedPath); err != nil {
 			m.savedPath = ""
 		}
@@ -516,6 +585,19 @@ func (m *model) preflight() tea.Cmd {
 	p := *m.plan
 	pr := prompter{send: m.send}
 	ctx := m.ctx
+	if m.local != nil {
+		local := m.local
+		return func() tea.Msg {
+			f, err := remote.Detect(ctx, local)
+			if err != nil {
+				return preflightMsg{err: err}
+			}
+			if err := checkFacts(f); err != nil {
+				return preflightMsg{err: err}
+			}
+			return preflightMsg{facts: f}
+		}
+	}
 	return func() tea.Msg {
 		auth := sshx.Auth{User: p.Server.User, KeyPath: p.Server.KeyPath, Password: p.Server.Password}
 		if auth.KeyPath != "" && sshx.KeyNeedsPassphrase(auth.KeyPath) {
@@ -541,17 +623,24 @@ func (m *model) preflight() tea.Cmd {
 		if err != nil {
 			return preflightMsg{err: err}
 		}
-		if !f.Systemd {
-			return preflightMsg{err: errors.New("the server does not run systemd, which secure-setup needs for the rollback timer")}
-		}
-		if f.PkgMgr == "" {
-			return preflightMsg{err: errors.New("no supported package manager on the server (apt-get, dnf, yum, pacman, zypper)")}
-		}
-		if f.WANIface == "" {
-			return preflightMsg{err: errors.New("could not find the server's internet interface (no default route)")}
+		if err := checkFacts(f); err != nil {
+			return preflightMsg{err: err}
 		}
 		return preflightMsg{facts: f}
 	}
+}
+
+func checkFacts(f *remote.Facts) error {
+	if !f.Systemd {
+		return errors.New("the server does not run systemd, which secure-setup needs for the rollback timer")
+	}
+	if f.PkgMgr == "" {
+		return errors.New("no supported package manager on the server (apt-get, dnf, yum, pacman, zypper)")
+	}
+	if f.WANIface == "" {
+		return errors.New("could not find the server's internet interface (no default route)")
+	}
+	return nil
 }
 
 func (m *model) startRun() tea.Cmd {
@@ -559,6 +648,7 @@ func (m *model) startRun() tea.Cmd {
 		Plan:   m.plan,
 		Report: func(e runner.Event) { m.send(runEventMsg(e)) },
 		Prompt: prompter{send: m.send},
+		Local:  m.local,
 	})
 	m.steps = r.Steps()
 	m.states = make([]stepState, len(m.steps))
@@ -619,7 +709,11 @@ func (m *model) View() string {
 	case phasePreflight:
 		b.WriteString(headerStyle.Render(titleStyle.Render("secure-setup")))
 		b.WriteString("\n")
-		b.WriteString(m.spin.View() + " Connecting to " + m.plan.Address() + " and looking around...\n")
+		if m.local != nil {
+			b.WriteString(m.spin.View() + " Looking around on this machine...\n")
+		} else {
+			b.WriteString(m.spin.View() + " Connecting to " + m.plan.Address() + " and looking around...\n")
+		}
 		b.WriteString(mutedStyle.Render("\nctrl+c to abort"))
 	case phaseRun:
 		b.WriteString(m.runView())
@@ -637,9 +731,19 @@ func (m *model) View() string {
 	return b.String()
 }
 
+func (m *model) target() string {
+	if m.local != nil {
+		if m.facts != nil {
+			return "this machine (" + m.facts.Hostname + ")"
+		}
+		return "this machine"
+	}
+	return m.plan.Server.Host
+}
+
 func (m *model) runView() string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render(titleStyle.Render("secure-setup") + mutedStyle.Render("  "+m.plan.Server.Host)))
+	b.WriteString(headerStyle.Render(titleStyle.Render("secure-setup") + mutedStyle.Render("  "+m.target())))
 	b.WriteString("\n")
 	for i, name := range m.steps {
 		var mark, text string
@@ -671,7 +775,7 @@ func (m *model) runView() string {
 
 func (m *model) doneView() string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render(titleStyle.Render("secure-setup") + mutedStyle.Render("  "+m.plan.Server.Host)))
+	b.WriteString(headerStyle.Render(titleStyle.Render("secure-setup") + mutedStyle.Render("  "+m.target())))
 	b.WriteString("\n")
 	if m.runErr != nil {
 		b.WriteString(errorBox.Width(clamp(m.width-2, 20, 100)).Render(errStyle.Render("Setup did not finish\n\n") + m.runErr.Error()))
@@ -683,11 +787,17 @@ func (m *model) doneView() string {
 		}
 		b.WriteString(logStyle.Render(strings.Join(tail, "\n")))
 		b.WriteString("\n\n")
-		if m.savedPath != "" {
+		if m.savedPath != "" && m.local != nil {
+			b.WriteString("Fix the cause and run again with:  secure-setup here -f " + m.savedPath + "\n")
+		} else if m.savedPath != "" {
 			b.WriteString("Fix the cause and run again with:  secure-setup apply -f " + m.savedPath + "\n")
 		}
 	} else {
-		b.WriteString(okStyle.Render("✓ The server is locked down.") + "\n\n")
+		if m.local != nil {
+			b.WriteString(okStyle.Render("✓ This machine is locked down.") + "\n\n")
+		} else {
+			b.WriteString(okStyle.Render("✓ The server is locked down.") + "\n\n")
+		}
 		b.WriteString(Summary(m.plan, m.result))
 	}
 	b.WriteString("\n" + mutedStyle.Render("press q to exit"))
@@ -709,26 +819,50 @@ func Summary(p *plan.Plan, r *runner.Result) string {
 	if r.SSHPort != 22 {
 		port = fmt.Sprintf(" -p %d", r.SSHPort)
 	}
-	line("SSH from now on", fmt.Sprintf("ssh%s %s@%s", port, p.Server.User, target))
+	user := p.Server.User
+	if user == "" {
+		user = "root"
+	}
+	line("SSH from now on", fmt.Sprintf("ssh%s %s@%s", port, user, target))
 	if r.DNSName != "" {
 		line("", "(tailnet IP "+r.AdminAddress+")")
 	}
-	if len(r.WebPorts) > 0 {
-		line("Web", "TCP "+plan.FormatPorts(r.WebPorts)+" from Cloudflare only; point a proxied DNS record at "+p.Server.Host)
+	public := p.Server.Host
+	if r.Local {
+		public = r.PublicAddress
 	}
-	if r.PublicSSHClosed {
+	if len(r.WebPorts) > 0 {
+		where := ""
+		if public != "" {
+			where = "; point a proxied DNS record at " + public
+		}
+		line("Web", "TCP "+plan.FormatPorts(r.WebPorts)+" from Cloudflare only"+where)
+	}
+	switch {
+	case r.Local && r.ConfirmedBy != "":
+		line("Confirmed by", r.ConfirmedBy)
+		if r.PublicSSHNote != "" {
+			line("Public SSH", "not testable from inside; "+r.PublicSSHNote)
+		}
+	case r.PublicSSHClosed:
 		line("Public SSH", "blocked (verified with a fresh connection from here)")
-	} else {
+	default:
 		line("Public SSH", warnStyle.Render("still reachable: "+r.PublicSSHNote))
 	}
 	if r.Hardened {
 		line("Password login", "disabled; keys only")
+	} else if r.HardenNote != "" {
+		line("Password login", warnStyle.Render("unchanged: "+r.HardenNote))
 	}
 	line("Rules", "/etc/nftables.conf (nft list ruleset)")
 	if len(r.WebPorts) > 0 {
 		line("Cloudflare ranges", "/etc/secure-setup/cloudflare.nft, refreshed daily")
 	}
-	line("Undo everything", fmt.Sprintf("secure-setup undo --host %s --user %s", r.AdminAddress, p.Server.User))
+	if r.Local {
+		line("Undo everything", "secure-setup undo --here")
+	} else {
+		line("Undo everything", fmt.Sprintf("secure-setup undo --host %s --user %s", r.AdminAddress, user))
+	}
 	return b.String()
 }
 

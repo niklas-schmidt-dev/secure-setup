@@ -45,11 +45,11 @@ table inet {{.TableName}} {
 		# Tailscale: direct WireGuard connections (authenticated; relays are used otherwise)
 		udp dport {{.TailscaleUDPPort}} accept
 
-		# Administration: only over the tailnet
+		# Administration: only over the tailnet (the counter shows new connections through this rule)
 {{- if .TailnetAll}}
-		iifname "{{.AdminInterface}}" accept
+		iifname "{{.AdminInterface}}" counter accept
 {{- else}}
-		iifname "{{.AdminInterface}}" tcp dport { {{.TailnetPortList}} } accept
+		iifname "{{.AdminInterface}}" tcp dport { {{.TailnetPortList}} } counter accept
 {{- end}}
 {{- if .WebPorts}}
 

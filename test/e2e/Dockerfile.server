@@ -2,7 +2,7 @@
 FROM debian:bookworm
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
- && apt-get install -y --no-install-recommends systemd systemd-sysv dbus openssh-server iproute2 ca-certificates curl procps \
+ && apt-get install -y --no-install-recommends systemd systemd-sysv dbus openssh-server openssh-client iproute2 ca-certificates curl procps expect \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /run/sshd /root/.ssh && chmod 700 /root/.ssh \
  && sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \

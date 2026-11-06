@@ -1,0 +1,16 @@
+#cloud-config
+# Lock a new server down at first boot, before anyone can reach it: Tailscale
+# joins with the auth key, sshd goes keys-only, nftables allows SSH only over
+# the tailnet and HTTPS only from Cloudflare. The run confirms itself with
+# self-checks (nobody can log in yet), then you connect over the tailnet.
+#
+# Paste this as "cloud-init user data" when creating the server (Hetzner:
+# "Cloud config"; DigitalOcean: "User data"; most providers have the field).
+# Replace the auth key with one from https://login.tailscale.com/admin/settings/keys
+# (reusable off, ephemeral off, tags as you like). Keep your SSH key in the
+# provider's "SSH keys" field: password login is turned off at the end.
+#
+# Afterwards:   ssh root@<server name>      (over your tailnet)
+# Progress:     /var/log/secure-setup-firstboot.log on the server
+runcmd:
+  - [ sh, -c, "TS_AUTHKEY=tskey-auth-REPLACE-ME sh -c \"$(curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh)\" -- here --yes > /var/log/secure-setup-firstboot.log 2>&1" ]

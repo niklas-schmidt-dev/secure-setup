@@ -1,15 +1,41 @@
-// Package remote runs the server-side steps over an sshx.Client.
+// Package remote runs the server-side steps on a Host: an SSH connection
+// (sshx.Client) or the machine itself (localhost.Host).
 package remote
 
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
+	"os/exec"
 	"strconv"
 	"strings"
 
-	"github.com/niklas-schmidt-dev/secure-setup/internal/sshx"
+	"golang.org/x/crypto/ssh"
 )
+
+// Host runs shell on the server. sshx.Client and localhost.Host implement it.
+type Host interface {
+	// Output runs cmd with /bin/sh and returns its trimmed stdout.
+	Output(ctx context.Context, cmd string) (string, error)
+	// Script runs a multi-line script with set -eu, streaming output lines.
+	Script(ctx context.Context, script string, onLine func(string)) error
+	// WriteFile writes data to path atomically with the given octal mode.
+	WriteFile(ctx context.Context, path string, data []byte, mode string) error
+}
+
+// exitStatus returns the exit code of a failed Script, or -1.
+func exitStatus(err error) int {
+	var se *ssh.ExitError
+	if errors.As(err, &se) {
+		return se.ExitStatus()
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
+}
 
 //go:embed assets/*
 var assets embed.FS
@@ -34,6 +60,7 @@ type Facts struct {
 	NFT        bool
 	SSHPort    int
 	WANIface   string
+	WANIPv4    string // first IPv4 address on WANIface, when known
 	Docker     bool
 
 	Tailscale      bool   // CLI installed
@@ -85,6 +112,8 @@ sshd_bin=$(command -v sshd || echo /usr/sbin/sshd)
 printf 'SSHPORT=%s\n' "$("$sshd_bin" -T 2>/dev/null | awk '$1=="port"{print $2; exit}')"
 printf 'WAN=%s\n' "$(ip -o -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
 printf 'WAN6=%s\n' "$(ip -o -6 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+wan=$(ip -o -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+if [ -n "$wan" ]; then printf 'WANIP=%s\n' "$(ip -o -4 addr show dev "$wan" 2>/dev/null | awk '{print $4; exit}' | cut -d/ -f1)"; fi
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then echo UFW=1; else echo UFW=0; fi
 if systemctl is-active --quiet firewalld 2>/dev/null; then echo FIREWALLD=1; else echo FIREWALLD=0; fi
 if command -v nft >/dev/null 2>&1 && nft list table inet secure_setup >/dev/null 2>&1; then echo SS_TABLE=1; else echo SS_TABLE=0; fi
@@ -93,7 +122,7 @@ if systemctl is-active --quiet secure-setup-rollback.timer 2>/dev/null; then ech
 `
 
 // Detect gathers Facts about the server.
-func Detect(ctx context.Context, c *sshx.Client) (*Facts, error) {
+func Detect(ctx context.Context, c Host) (*Facts, error) {
 	kv := map[string]string{}
 	err := c.Script(ctx, detectScript, func(line string) {
 		if k, v, ok := strings.Cut(line, "="); ok {
@@ -120,6 +149,7 @@ func Detect(ctx context.Context, c *sshx.Client) (*Facts, error) {
 		RolledBack:       kv["ROLLED_BACK"],
 		RollbackArmed:    kv["ROLLBACK_ARMED"] == "1",
 		WANIface:         kv["WAN"],
+		WANIPv4:          kv["WANIP"],
 	}
 	if f.WANIface == "" {
 		f.WANIface = kv["WAN6"]
@@ -146,7 +176,7 @@ func Detect(ctx context.Context, c *sshx.Client) (*Facts, error) {
 }
 
 // InstallPackages installs packages with the detected package manager.
-func InstallPackages(ctx context.Context, c *sshx.Client, f *Facts, onLine func(string), pkgs ...string) error {
+func InstallPackages(ctx context.Context, c Host, f *Facts, onLine func(string), pkgs ...string) error {
 	if len(pkgs) == 0 {
 		return nil
 	}
