@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -167,5 +168,13 @@ func TestStepOrder(t *testing.T) {
 	}
 	if !plan.Default().UpdateSystem {
 		t.Fatal("the system update is not on by default")
+	}
+}
+
+func TestTailnetAddr(t *testing.T) {
+	for ip, want := range map[string]bool{"100.65.75.118": true, "100.64.0.1": true, "100.128.0.1": false, "159.69.46.241": false, "fd7a:115c:a1e0::2": true, "2001:db8::1": false} {
+		if got := tailnetAddr(netip.MustParseAddr(ip)); got != want {
+			t.Fatalf("%s: %v", ip, got)
+		}
 	}
 }

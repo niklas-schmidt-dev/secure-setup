@@ -818,6 +818,9 @@ func Summary(p *plan.Plan, r *runner.Result) string {
 	}
 	var b strings.Builder
 	line := func(k, v string) { fmt.Fprintf(&b, "%-24s %s\n", k, runner.Printable(v)) }
+	// warn highlights a line; the text is cleaned before the style's own
+	// escape codes are added, so they survive.
+	warn := func(k, v string) { fmt.Fprintf(&b, "%-24s %s\n", k, warnStyle.Render(runner.Printable(v))) }
 	target := r.AdminAddress
 	if r.DNSName != "" {
 		target = r.DNSName
@@ -854,21 +857,21 @@ func Summary(p *plan.Plan, r *runner.Result) string {
 	case r.PublicSSHClosed:
 		line("Public SSH", "blocked (verified with a fresh connection from here)")
 	default:
-		line("Public SSH", warnStyle.Render("still reachable: "+r.PublicSSHNote))
+		warn("Public SSH", "still reachable: "+r.PublicSSHNote)
 	}
 	if r.Hardened {
 		line("Password login", "disabled; keys only")
 	} else if r.HardenNote != "" {
-		line("Password login", warnStyle.Render("unchanged: "+r.HardenNote))
+		warn("Password login", "unchanged: "+r.HardenNote)
 	}
 	switch {
 	case r.TailscaleSSH == "on":
 		line("Tailscale SSH", "on: logins over the tailnet follow your tailnet policy")
 	case r.TailscaleSSH != "":
-		line("Tailscale SSH", warnStyle.Render(r.TailscaleSSH))
+		warn("Tailscale SSH", r.TailscaleSSH)
 	}
 	if r.RebootNeeded {
-		line("Reboot", warnStyle.Render("recommended: the system update needs it to finish"))
+		warn("Reboot", "recommended: the system update needs it to finish")
 	}
 	line("Rules", "/etc/nftables.conf (nft list ruleset)")
 	if len(r.WebPorts) > 0 {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -205,5 +206,29 @@ func TestBannerReachesCaller(t *testing.T) {
 	c.Close()
 	if !strings.Contains(got, "login.tailscale.com/a/check") {
 		t.Fatalf("banner %q", got)
+	}
+}
+
+// Cancelling the context interrupts a login that waits on the server (a
+// Tailscale SSH check nobody approves) instead of waiting for the deadline.
+func TestDialStopsOnCancel(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			defer c.Close()
+			time.Sleep(time.Minute) // never answers
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	time.AfterFunc(300*time.Millisecond, cancel)
+	start := time.Now()
+	_, err = Dial(ctx, ln.Addr().String(), Auth{User: "root", Password: "x", Banner: func(string) {}}, HostKeyPolicy{Expect: newSigner(t).PublicKey()})
+	if !errors.Is(err, context.Canceled) || time.Since(start) > 5*time.Second {
+		t.Fatalf("err %v after %s", err, time.Since(start))
 	}
 }

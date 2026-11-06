@@ -13,6 +13,7 @@ import (
 	"io"
 	"io/fs"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,7 +112,16 @@ func Dial(ctx context.Context, addr string, auth Auth, policy HostKeyPolicy) (*C
 		return nil, fmt.Errorf("connect to %s: %w", addr, err)
 	}
 	_ = nc.SetDeadline(loginDeadline)
+	// Cancelling ctx interrupts the handshake and login instead of waiting
+	// for the deadline.
+	stop := context.AfterFunc(ctx, func() { nc.Close() })
 	sc, chans, reqs, err := ssh.NewClientConn(nc, addr, cfg)
+	if !stop() {
+		if err == nil {
+			sc.Close()
+		}
+		return nil, fmt.Errorf("ssh %s@%s: %w", auth.User, addr, ctx.Err())
+	}
 	if err != nil {
 		nc.Close()
 		for _, sentinel := range []error{ErrHostKeyMismatch, ErrHostKeyRejected, context.Canceled} {
@@ -126,6 +136,18 @@ func Dial(ctx context.Context, addr string, auth Auth, policy HostKeyPolicy) (*C
 }
 
 // Close ends the connection.
+// RemoteIP is the server address this connection goes to.
+func (c *Client) RemoteIP() netip.Addr {
+	if c == nil || c.conn == nil {
+		return netip.Addr{}
+	}
+	ap, err := netip.ParseAddrPort(c.conn.RemoteAddr().String())
+	if err != nil {
+		return netip.Addr{}
+	}
+	return ap.Addr().Unmap()
+}
+
 func (c *Client) Close() error {
 	if c == nil || c.conn == nil {
 		return nil
