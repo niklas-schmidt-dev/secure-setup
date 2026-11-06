@@ -2,9 +2,11 @@ package remote
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -14,6 +16,7 @@ type recordHost struct {
 	scripts []string
 	files   map[string]string
 	output  func(cmd string) string
+	stdout  func(script string) string // lines a script prints, when set
 }
 
 func (h *recordHost) Output(_ context.Context, cmd string) (string, error) {
@@ -23,8 +26,13 @@ func (h *recordHost) Output(_ context.Context, cmd string) (string, error) {
 	return "", nil
 }
 
-func (h *recordHost) Script(_ context.Context, s string, _ func(string)) error {
+func (h *recordHost) Script(_ context.Context, s string, onLine func(string)) error {
 	h.scripts = append(h.scripts, s)
+	if h.stdout != nil && onLine != nil {
+		for _, l := range strings.Split(h.stdout(s), "\n") {
+			onLine(l)
+		}
+	}
 	return nil
 }
 
@@ -67,15 +75,20 @@ func TestApplyAndRollbackRestoreHostFirewall(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := h.all()
-	armed, stop, load := strings.Index(s, "systemd-run"), strings.Index(s, "ufw --force disable"), strings.Index(s, "nft -f ")
+	armed, stop, load := strings.Index(s, "systemd-run"), strings.Index(s, `"$ufw_init" stop`), strings.Index(s, "nft -f ")
 	if armed < 0 || stop < armed || load < stop {
 		t.Fatalf("order must be: arm timer, stop host firewall, load rules:\n%s", s)
 	}
-	if !strings.Contains(s, "ufw --force enable") || !strings.Contains(s, "systemctl start firewalld") {
+	// ufw stays enabled at boot until the rules are confirmed, so a reboot
+	// inside the rollback window brings it back.
+	if strings.Index(s, "ufw --force disable") < strings.Index(s, "else ufw --force disable") {
+		t.Fatal("apply disables ufw at boot when ufw-init exists")
+	}
+	if !strings.Contains(s, `"$ufw_init" start`) || !strings.Contains(s, "systemctl start firewalld") {
 		t.Fatal("failed apply does not restart the host firewall")
 	}
 	rb := asset("rollback.sh")
-	if !strings.Contains(rb, "ufw --force enable") || !strings.Contains(rb, "systemctl start firewalld") {
+	if !strings.Contains(rb, `"$ufw_init" start`) || !strings.Contains(rb, "systemctl start firewalld") {
 		t.Fatal("rollback.sh does not restart the host firewall")
 	}
 }
@@ -95,11 +108,35 @@ func TestConfirmRetiresAndMasks(t *testing.T) {
 	if !strings.Contains(s, FirewalldWasEnabled) {
 		t.Fatal("an enabled-but-stopped firewalld is not handled")
 	}
+	if d := strings.Index(s, "ufw --force disable"); d < timer {
+		t.Fatal("ufw is not disabled at boot after confirmation")
+	}
 }
 
 func TestDetectReadsFirewalldEnablement(t *testing.T) {
 	if !strings.Contains(detectScript, "is-enabled --quiet firewalld") {
 		t.Fatal("detect does not ask whether firewalld is enabled at boot")
+	}
+}
+
+// Every device with a default route is internet-facing, the IPv4 one first.
+func TestDetectListsEveryDefaultRouteDevice(t *testing.T) {
+	for _, c := range []struct {
+		out     string
+		primary string
+		all     []string
+	}{
+		{"SYSTEMD=1\nWAN=eth0\nWAN6=he-ipv6\nWANS=eth0 eth0 he-ipv6 \n", "eth0", []string{"eth0", "he-ipv6"}},
+		{"SYSTEMD=1\nWAN=\nWAN6=ens3\nWANS=ens3 \n", "ens3", []string{"ens3"}},
+		{"SYSTEMD=1\nWAN=\nWAN6=\nWANS=\n", "", nil},
+	} {
+		f, err := Detect(context.Background(), &recordHost{stdout: func(string) string { return c.out }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f.WANIface != c.primary || !slices.Equal(f.WANIfaces, c.all) {
+			t.Fatalf("%q: WANIface %q WANIfaces %q, want %q %q", c.out, f.WANIface, f.WANIfaces, c.primary, c.all)
+		}
 	}
 }
 
@@ -222,5 +259,100 @@ func TestRestoreSSHDKeepsEarlierRun(t *testing.T) {
 	}
 	if !strings.Contains(fresh.all(), RevertSSHDScript) {
 		t.Fatal("without an earlier drop-in the hardening is not removed")
+	}
+}
+
+// The boot file comes from nftables.service itself, parsed with the
+// system's sh and sed from what `systemctl show` prints.
+func TestNFTBootFileScript(t *testing.T) {
+	for show, want := range map[string]string{
+		"{ path=/usr/sbin/nft ; argv[]=/usr/sbin/nft -f /etc/nftables.conf ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }":   "/etc/nftables.conf",
+		"{ path=/sbin/nft ; argv[]=/sbin/nft -f /etc/sysconfig/nftables.conf ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }": "/etc/sysconfig/nftables.conf",
+		"{ path=/usr/sbin/nft ; argv[]=/usr/sbin/nft -I /etc/nftables --file /etc/nftables/main.nft ; ignore_errors=no }":                                                  "/etc/nftables/main.nft",
+		"": "",
+	} {
+		dir := t.TempDir()
+		stub := "#!/bin/sh\nprintf '%s\\n' '" + show + "'\n"
+		if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte(stub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", "-c", NFTBootFileScript+`printf '%s' "$boot"`)
+		cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		if string(out) != want {
+			t.Fatalf("show %q: boot %q, want %q", show, out, want)
+		}
+	}
+}
+
+// Staging refuses a system whose nftables.service loads no file, and
+// confirmation wires the ruleset into whatever file it loads.
+func TestBootFileWiring(t *testing.T) {
+	h := &recordHost{}
+	if err := PrepareFirewall(context.Background(), h, &Facts{NFT: true}, FirewallFiles{Ruleset: "x"}, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(h.scripts[0], NFTBootFileScript) || !strings.Contains(h.scripts[0], `if [ -z "$boot" ]`) {
+		t.Fatal("staging does not check the boot file first")
+	}
+	h = &recordHost{}
+	if err := ConfirmFirewall(context.Background(), h, &Facts{}, false, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	s := h.all()
+	check, dry, stop := strings.Index(s, `if [ -z "$boot" ]`), strings.Index(s, `nft -c -f "$check"`), strings.Index(s, "systemctl stop "+RollbackUnit+".timer")
+	if check < 0 || dry < check || stop < dry {
+		t.Fatal("the boot file is not dry-run with the new rules before the rollback timer is cancelled")
+	}
+	// The host firewall is retired only after the rules are persisted and
+	// loaded by nftables.service, so a failure leaves it enabled at boot.
+	start, retire := strings.Index(s, "systemctl start nftables"), strings.Index(s, "ufw --force disable")
+	if start < stop || retire < start {
+		t.Fatal("ufw/firewalld are retired before persistence succeeded")
+	}
+	for _, want := range []string{bootIncludeMarker, `nft -c -f "$boot"`, "systemctl enable nftables"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("confirm script lacks %q", want)
+		}
+	}
+	if strings.Contains(s, "sysconfig") {
+		t.Fatal("confirm still hard-codes a distribution path")
+	}
+}
+
+// The join never turns Tailscale SSH on; that waits until the tailnet is
+// known to be the operator's.
+func TestTailscaleUpLeavesSSHOff(t *testing.T) {
+	h := &recordHost{}
+	if err := TailscaleUp(context.Background(), h, UpOptions{Hostname: "srv"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(h.all(), "--ssh") || !strings.Contains(h.all(), "tailscale up") {
+		t.Fatalf("join script: %s", h.all())
+	}
+	h = &recordHost{}
+	if err := TailscaleSetSSH(context.Background(), h, nil); err != nil || !strings.Contains(h.all(), "tailscale set --ssh") {
+		t.Fatalf("set ssh: %v %s", err, h.all())
+	}
+}
+
+func TestTailnetName(t *testing.T) {
+	for _, c := range []struct {
+		json, want string
+	}{
+		{`{"MagicDNSSuffix":"tail1234.ts.net","CurrentTailnet":{"Name":"alice@example.com"}}`, "alice@example.com (tail1234.ts.net)"},
+		{`{"MagicDNSSuffix":"","Self":{"DNSName":"srv.other-tailnet.ts.net."}}`, "other-tailnet.ts.net"},
+		{`{}`, "unknown"},
+	} {
+		var st TSStatus
+		if err := json.Unmarshal([]byte(c.json), &st); err != nil {
+			t.Fatal(err)
+		}
+		if got := st.Tailnet(); got != c.want {
+			t.Fatalf("%s: %q, want %q", c.json, got, c.want)
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,14 +30,15 @@ const (
 
 // Params describes the inbound policy for one server.
 type Params struct {
-	AdminInterface   string // interface the tailnet arrives on (tailscale0)
-	WANInterface     string // interface that carries the default route (eth0, ens3, ...)
-	TailnetTCPPorts  []int  // TCP ports reachable from the tailnet; must contain the SSH port
-	TailnetAll       bool   // allow everything from the tailnet instead of only TailnetTCPPorts
-	WebPorts         []int  // TCP ports Cloudflare may reach (443, optionally 80); empty = no web traffic
-	AllowPing        bool   // rate-limited ICMP echo from anywhere
-	TailscaleUDPPort int    // WireGuard port for direct Tailscale connections
-	ElementsPath     string // include file holding the Cloudflare set elements
+	AdminInterface   string   // interface the tailnet arrives on (tailscale0)
+	WANInterface     string   // interface that carries the default route (eth0, ens3, ...)
+	ExtraWAN         []string // further internet-facing interfaces (an IPv6 uplink, a second default route)
+	TailnetTCPPorts  []int    // TCP ports reachable from the tailnet; must contain the SSH port
+	TailnetAll       bool     // allow everything from the tailnet instead of only TailnetTCPPorts
+	WebPorts         []int    // TCP ports Cloudflare may reach (443, optionally 80); empty = no web traffic
+	AllowPing        bool     // rate-limited ICMP echo from anywhere
+	TailscaleUDPPort int      // WireGuard port for direct Tailscale connections
+	ElementsPath     string   // include file holding the Cloudflare set elements
 }
 
 type view struct {
@@ -45,6 +47,7 @@ type view struct {
 	Marker          string
 	TailnetPortList string
 	WebPortList     string
+	WANSet          string // "eth0", or { "eth0", "he-ipv6" } with extra uplinks
 }
 
 var ifaceRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
@@ -65,6 +68,7 @@ func Render(p Params) (string, error) {
 		Marker:          Marker,
 		TailnetPortList: joinPorts(p.TailnetTCPPorts),
 		WebPortList:     joinPorts(p.WebPorts),
+		WANSet:          ifaceSet(append([]string{p.WANInterface}, p.ExtraWAN...)),
 	}
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, v); err != nil {
@@ -94,13 +98,22 @@ func (p Params) normalized() (Params, error) {
 	if p.WANInterface == "" {
 		return p, errors.New("nftgen: the internet-facing interface is required")
 	}
-	for _, n := range []string{p.AdminInterface, p.WANInterface} {
+	var extra []string
+	for _, n := range p.ExtraWAN {
+		if n != p.WANInterface && !slices.Contains(extra, n) {
+			extra = append(extra, n)
+		}
+	}
+	p.ExtraWAN = extra
+	for _, n := range append([]string{p.AdminInterface, p.WANInterface}, p.ExtraWAN...) {
 		if !ifaceRe.MatchString(n) {
 			return p, fmt.Errorf("nftgen: invalid interface name %q", n)
 		}
 	}
-	if p.AdminInterface == p.WANInterface {
-		return p, fmt.Errorf("nftgen: admin interface and internet interface are both %q", p.WANInterface)
+	for _, n := range append([]string{p.WANInterface}, p.ExtraWAN...) {
+		if p.AdminInterface == n {
+			return p, fmt.Errorf("nftgen: admin interface and internet interface are both %q", n)
+		}
 	}
 	if p.TailscaleUDPPort == 0 {
 		p.TailscaleUDPPort = DefaultTailscaleUDPPort
@@ -151,4 +164,17 @@ func joinPrefixes(ps []netip.Prefix) string {
 		s[i] = p.String()
 	}
 	return strings.Join(s, ", ")
+}
+
+// ifaceSet renders one interface name as "eth0" and several as an
+// anonymous set, so a single uplink keeps the plain form.
+func ifaceSet(names []string) string {
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = `"` + n + `"`
+	}
+	if len(quoted) == 1 {
+		return quoted[0]
+	}
+	return "{ " + strings.Join(quoted, ", ") + " }"
 }

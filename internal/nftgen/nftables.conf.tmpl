@@ -66,12 +66,12 @@ table inet {{.TableName}} {
 		ct state invalid drop
 
 		# Containers, VMs and the tailnet may be forwarded (container egress, subnet routes)
-		iifname != "{{.WANInterface}}" accept
+		iifname != {{.WANSet}} accept
 {{- if .WebPorts}}
 
 		# Published container ports: the internet reaches them only through Cloudflare on the web ports
-		iifname "{{.WANInterface}}" meta l4proto tcp ip saddr @cloudflare_v4 ct original proto-dst { {{.WebPortList}} } accept
-		iifname "{{.WANInterface}}" meta l4proto tcp ip6 saddr @cloudflare_v6 ct original proto-dst { {{.WebPortList}} } accept
+		iifname {{.WANSet}} meta l4proto tcp ip saddr @cloudflare_v4 ct original proto-dst { {{.WebPortList}} } accept
+		iifname {{.WANSet}} meta l4proto tcp ip6 saddr @cloudflare_v6 ct original proto-dst { {{.WebPortList}} } accept
 {{- end}}
 	}
 

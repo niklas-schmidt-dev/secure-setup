@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -92,5 +94,57 @@ func TestResolveWAN(t *testing.T) {
 	p.Firewall.WANOverride = true
 	if err := resolveWAN(ctx, fakeHost{ifaces: []string{"eth0"}}, &p, f, log); err != nil || p.Firewall.WANInterface != "eth0" {
 		t.Fatalf("explicit override refused: %v", err)
+	}
+}
+
+// Other default-route devices join the internet set; the primary uplink and
+// the admin interface do not.
+func TestExtraWAN(t *testing.T) {
+	p := plan.Default()
+	p.Firewall.WANInterface = "eth0"
+	p.Tailscale.AdminInterface = "eth1"
+	r := &Runner{o: Options{Plan: &p}, facts: &remote.Facts{WANIfaces: []string{"eth0", "he-ipv6", "eth1", "ens4"}}}
+	var logs []string
+	got := r.extraWAN(func(l string) { logs = append(logs, l) })
+	if !slices.Equal(got, []string{"he-ipv6", "ens4"}) {
+		t.Fatalf("extraWAN = %q", got)
+	}
+	if len(logs) != 2 || !strings.Contains(logs[0], "eth1") {
+		t.Fatalf("logs = %q", logs)
+	}
+}
+
+// scriptHost records scripts and fails them when fail is set.
+type scriptHost struct {
+	fakeHost
+	scripts *[]string
+	fail    bool
+}
+
+func (h scriptHost) Script(ctx context.Context, s string, _ func(string)) error {
+	*h.scripts = append(*h.scripts, s)
+	if h.fail {
+		return errors.New("exit status 1")
+	}
+	return ctx.Err()
+}
+
+// A failure while a login-link join is unverified logs the node out, even
+// when the run itself was cancelled, and says so; a failed logout is reported.
+func TestLeaveUnverifiedTailnet(t *testing.T) {
+	var scripts []string
+	r := &Runner{joinedByLink: true}
+	err := r.leaveUnverifiedTailnet(scriptHost{scripts: &scripts}, context.Canceled, func(string) {})
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "logged out") || len(scripts) != 1 || !strings.Contains(scripts[0], "tailscale logout") || r.joinedByLink {
+		t.Fatalf("err %v, scripts %q", err, scripts)
+	}
+	r.joinedByLink = true
+	err = r.leaveUnverifiedTailnet(scriptHost{scripts: &scripts, fail: true}, errors.New("unreachable"), func(string) {})
+	if !strings.Contains(err.Error(), "failed too") {
+		t.Fatalf("failed logout not reported: %v", err)
+	}
+	scripts = nil
+	if err := r.leaveUnverifiedTailnet(scriptHost{scripts: &scripts}, errors.New("x"), func(string) {}); len(scripts) != 0 || err.Error() != "x" {
+		t.Fatal("a verified tailnet was logged out")
 	}
 }

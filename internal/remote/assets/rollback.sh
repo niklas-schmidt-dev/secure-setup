@@ -12,7 +12,11 @@ else
 	msg="firewall table removed (no previous state to restore)"
 fi
 if [ -e "$STATE/ufw-was-active" ]; then
-	if ufw --force enable >/dev/null 2>&1; then msg="$msg; ufw re-enabled"; else msg="$msg; ufw could NOT be re-enabled"; fi
+	# The apply only stopped ufw's rules (ufw-init stop); it is still enabled.
+	ufw_init=; for p in /lib/ufw/ufw-init /usr/lib/ufw/ufw-init; do if [ -x "$p" ]; then ufw_init=$p; break; fi; done
+	if [ -n "$ufw_init" ] && "$ufw_init" start >/dev/null 2>&1; then msg="$msg; ufw re-enabled"
+	elif ufw --force enable >/dev/null 2>&1; then msg="$msg; ufw re-enabled"
+	else msg="$msg; ufw could NOT be re-enabled"; fi
 fi
 if [ -e "$STATE/firewalld-was-active" ]; then
 	if systemctl start firewalld >/dev/null 2>&1; then msg="$msg; firewalld restarted"; else msg="$msg; firewalld could NOT be restarted"; fi

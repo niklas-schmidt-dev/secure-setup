@@ -35,6 +35,22 @@ const (
 	unitDir        = "/etc/systemd/system/"
 )
 
+// NFTBootFileScript sets $boot to the file nftables.service loads at boot
+// (the -f argument of its ExecStart), or to "" when there is none. The rules
+// survive a reboot only through that file.
+const NFTBootFileScript = `boot=$(systemctl show -p ExecStart --value nftables.service 2>/dev/null | sed -n -e 's/.*argv\[\]=[^;]* -f \([^ ;]*\).*/\1/p' -e 's/.*argv\[\]=[^;]* --file \([^ ;]*\).*/\1/p' | head -n 1)
+`
+
+// bootIncludeMarker precedes the include line ConfirmFirewall adds to a boot
+// file other than /etc/nftables.conf, so undo removes exactly that line.
+const bootIncludeMarker = "# secure-setup: added the next line"
+
+// ufwInitScript sets $ufw_init to ufw's init helper. ufw-init stop drops ufw's
+// rules but leaves it enabled at boot, unlike `ufw disable`; ufw-init start
+// loads them again.
+const ufwInitScript = `ufw_init=; for p in /lib/ufw/ufw-init /usr/lib/ufw/ufw-init; do if [ -x "$p" ]; then ufw_init=$p; break; fi; done
+`
+
 // FirewallFiles is what PrepareFirewall installs.
 type FirewallFiles struct {
 	Ruleset        string // full nftables.conf
@@ -60,7 +76,11 @@ func PrepareFirewall(ctx context.Context, c Host, f *Facts, files FirewallFiles,
 
 	// Record which host firewall is running; it keeps running until the
 	// rollback timer is armed (ApplyFirewall).
-	record := fmt.Sprintf("mkdir -p %s\nrm -f %s %s %s\n", StateDir, UFWWasActive, FirewalldWasActive, FirewalldWasEnabled)
+	// The rules must be able to survive a reboot before they go live.
+	record := NFTBootFileScript + `if [ -z "$boot" ]; then echo "nftables.service loads no ruleset file on this system, so the new rules could not survive a reboot" >&2; exit 1; fi
+echo "nftables.service loads $boot at boot"
+`
+	record += fmt.Sprintf("mkdir -p %s\nrm -f %s %s %s\n", StateDir, UFWWasActive, FirewalldWasActive, FirewalldWasEnabled)
 	if f.UFWActive {
 		record += "touch " + UFWWasActive + "\n"
 		onLine("ufw is active: it stops when the new rules go live and comes back if they roll back")
@@ -129,17 +149,20 @@ systemctl reset-failed %[1]s.timer >/dev/null 2>&1 || true
 rm -f %[2]s
 systemd-run --quiet --unit=%[1]s --on-active=%[3]d --timer-property=AccuracySec=1s --description="secure-setup firewall rollback" /bin/sh %[4]s
 echo "rollback timer armed: fires in %[3]ds unless confirmed"
-if [ -e %[6]s ]; then ufw --force disable >/dev/null; echo "ufw stopped (comes back if the rules roll back)"; fi
+%[8]sif [ -e %[6]s ]; then
+	if [ -n "$ufw_init" ]; then "$ufw_init" stop >/dev/null; else ufw --force disable >/dev/null; fi
+	echo "ufw stopped (comes back if the rules roll back)"
+fi
 if [ -e %[7]s ]; then systemctl stop firewalld; echo "firewalld stopped (comes back if the rules roll back)"; fi
 if ! nft -f %[5]s; then
 	systemctl stop %[1]s.timer >/dev/null 2>&1 || true
-	if [ -e %[6]s ]; then ufw --force enable >/dev/null || true; fi
+	if [ -e %[6]s ]; then if [ -n "$ufw_init" ]; then "$ufw_init" start >/dev/null || true; else ufw --force enable >/dev/null || true; fi; fi
 	if [ -e %[7]s ]; then systemctl start firewalld || true; fi
 	echo "applying the ruleset failed; the previous firewall is back" >&2
 	exit 1
 fi
 echo "new firewall rules are live"
-`, RollbackUnit, RolledBackMarker, rollbackSeconds, RollbackScript, PendingPath, UFWWasActive, FirewalldWasActive)
+`, RollbackUnit, RolledBackMarker, rollbackSeconds, RollbackScript, PendingPath, UFWWasActive, FirewalldWasActive, ufwInitScript)
 	if err := c.Script(ctx, script, onLine); err != nil {
 		return fmt.Errorf("apply firewall: %w", err)
 	}
@@ -150,13 +173,36 @@ echo "new firewall rules are live"
 // services. Over SSH it must run on a connection opened after ApplyFirewall;
 // locally the caller proves reachability first (see Sessions).
 func ConfirmFirewall(ctx context.Context, c Host, f *Facts, cloudflareSync bool, onLine func(string)) error {
-	rhelInclude := ""
-	if f.Family() == "rhel" {
-		rhelInclude = `touch /etc/sysconfig/nftables.conf
-grep -q '^include "/etc/nftables.conf"' /etc/sysconfig/nftables.conf || echo 'include "/etc/nftables.conf"' >> /etc/sysconfig/nftables.conf
-`
-	}
+	// nftables.service loads $boot; when that is another file (Fedora and RHEL
+	// use /etc/sysconfig/nftables.conf), it must include /etc/nftables.conf.
+	// Checked with the new rules while the rollback timer still runs.
+	preflight := fmt.Sprintf(`if [ -z "$boot" ]; then echo "nftables.service loads no ruleset file, so the rules could not survive a reboot; not keeping them (the rollback restores the previous firewall)" >&2; exit 1; fi
+if [ "$boot" = %[1]s ]; then check=%[2]s; else
+	check=%[3]s/boot-check.nft
+	sed 's|include "%[1]s"|include "%[2]s"|g' "$boot" > "$check" 2>/dev/null || : > "$check"
+	grep -q 'include "%[2]s"' "$check" || echo 'include "%[2]s"' >> "$check"
+fi
+if ! nft -c -f "$check" >/dev/null; then
+	echo "nft cannot load $boot with the new rules, so they could not survive a reboot; not keeping them (the rollback restores the previous firewall)" >&2
+	exit 1
+fi
+`, nftgen.ConfigPath, PendingPath, StateDir)
+	bootWiring := fmt.Sprintf(`if [ "$boot" != %[1]s ]; then
+	touch "$boot"
+	if ! grep -q '^include "%[1]s"' "$boot"; then
+		printf '%%s\n%%s\n' '%[2]s' 'include "%[1]s"' >> "$boot"
+		echo "added an include of %[1]s to $boot"
+	fi
+fi
+if ! nft -c -f "$boot" >/dev/null; then
+	echo "nft cannot load $boot, which nftables.service reads at boot: the rules are live now; ufw/firewalld stay enabled at boot" >&2
+	exit 1
+fi
+systemctl enable nftables >/dev/null 2>&1 || { echo "could not enable nftables.service at boot: the rules are live now; ufw/firewalld stay enabled at boot" >&2; exit 1; }
+systemctl start nftables >/dev/null 2>&1 || { echo "nftables.service could not load $boot: the rules are live now; ufw/firewalld stay enabled at boot" >&2; exit 1; }
+`, nftgen.ConfigPath, bootIncludeMarker)
 	retireScript := fmt.Sprintf(`if [ -e %[1]s ]; then
+	ufw --force disable >/dev/null 2>&1 || true
 	systemctl disable ufw >/dev/null 2>&1 || true
 	mv -f %[1]s %[2]s
 	echo "ufw retired (nftables takes over)"
@@ -176,21 +222,21 @@ echo "daily Cloudflare range refresh enabled (%s.timer)"
 %s
 `, SyncUnit, SyncUnit, SyncScriptPath)
 	}
+	// The host firewall is retired last: if persisting fails, it is still
+	// enabled at boot.
 	script := fmt.Sprintf(`
 if [ -e %[1]s ]; then echo "the rollback already fired at $(cat %[1]s)" >&2; exit 2; fi
-systemctl stop %[2]s.timer
+%[10]s%[11]ssystemctl stop %[2]s.timer
 systemctl stop %[2]s.service >/dev/null 2>&1 || true
 echo "rollback timer cancelled"
 nft list table inet %[3]s >/dev/null
-%[9]s
 if [ -f %[4]s ] && ! grep -q '%[5]s' %[4]s; then
 	cp -a %[4]s %[4]s.secure-setup.bak
 	echo "kept the previous %[4]s as %[4]s.secure-setup.bak"
 fi
 install -m 0644 %[6]s %[4]s
-%[7]ssystemctl enable --now nftables >/dev/null 2>&1
-echo "ruleset persisted in %[4]s; nftables.service enabled at boot"
-%[8]s`, RolledBackMarker, RollbackUnit, nftgen.TableName, nftgen.ConfigPath, nftgen.Marker, PendingPath, rhelInclude, sync, retireScript)
+%[7]secho "ruleset persisted in %[4]s; nftables.service loads it at boot ($boot)"
+%[9]s%[8]s`, RolledBackMarker, RollbackUnit, nftgen.TableName, nftgen.ConfigPath, nftgen.Marker, PendingPath, bootWiring, sync, retireScript, NFTBootFileScript, preflight)
 	if err := c.Script(ctx, script, onLine); err != nil {
 		if exitStatus(err) == 2 {
 			return ErrRolledBack

@@ -16,7 +16,8 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-
 
 Either way the guided wizard:
 
-1. installs Tailscale and joins your tailnet (auth key or login link)
+1. installs Tailscale and joins your tailnet (auth key or login link; after a
+   login link it checks that the tailnet is yours before going on)
 2. switches SSH to keys only, after installing and verifying your key
 3. installs an nftables firewall: SSH only over the tailnet, HTTPS only from
    Cloudflare's published ranges, everything else dropped
@@ -57,7 +58,8 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-
 
 **Unattended at first boot**: see [examples/cloud-init.yaml](examples/cloud-init.yaml).
 It runs as soon as cloud-init reaches its final stage and needs a Tailscale
-auth key. Until the new rules are live (a few minutes) the server is as
+auth key: an unattended run refuses the login link, because nobody is there
+to open it and anyone who reads the pending link could claim the server. Until the new rules are live (a few minutes) the server is as
 reachable as the provider image makes it, and if the run fails it stays
 that way, so check `/var/log/secure-setup-firstboot.log` or test the public
 port from outside before you rely on it. Pair it with a provider firewall
@@ -143,7 +145,7 @@ differ in who proves that the new rules let you in:
 
 | Path | Purpose |
 |---|---|
-| `/etc/nftables.conf` | the ruleset, loaded by `nftables.service` at boot (a previous file is kept as `.secure-setup.bak`) |
+| `/etc/nftables.conf` | the ruleset, loaded by `nftables.service` at boot (a previous file is kept as `.secure-setup.bak`); where the unit loads another file, such as `/etc/sysconfig/nftables.conf` on Fedora and RHEL, that file gets an `include` of it. A system whose `nftables.service` loads no file is refused before any rule goes live |
 | `/etc/secure-setup/cloudflare.nft` | Cloudflare IPv4 and IPv6 ranges, included by the ruleset |
 | `/usr/local/sbin/secure-setup-cloudflare-sync` | refreshes the ranges; run daily by `secure-setup-cloudflare-sync.timer` |
 | `/etc/ssh/sshd_config.d/00-secure-setup.conf` | password login off, root login with keys only |
@@ -151,8 +153,10 @@ differ in who proves that the new rules let you in:
 | `/etc/secure-setup/plan.json` | the answers of a `here` run, for `secure-setup here -f` next time |
 
 ufw or firewalld, when active, keep running until the new rules go live under
-the rollback timer; a rollback starts them again. Only after confirmation is
-ufw disabled and firewalld disabled and masked (also when it was enabled at
+the rollback timer; a rollback starts them again. ufw's rules are only
+stopped then (`ufw-init stop`), so it stays enabled at boot until the
+confirmation. Only after confirmation is ufw disabled and firewalld disabled
+and masked (also when it was enabled at
 boot but not running, so it cannot replace the rules at the next boot).
 sshd hardening never loosens a stricter `PermitRootLogin` (`no`,
 `forced-commands-only`), and is reverted when sshd's effective policy, Match
@@ -166,7 +170,7 @@ The ruleset in words:
 - UDP 41641 from anywhere: accept (direct Tailscale connections; authenticated WireGuard)
 - SSH and any extra ports you chose, only on `tailscale0`: accept (with a counter: `nft list chain inet secure_setup input` shows how many connections came in this way)
 - TCP 443 (and 80 if chosen), only from Cloudflare's ranges: accept
-- forwarded traffic (Docker, VMs): allowed from inside, allowed from the internet only through Cloudflare on the web ports
+- forwarded traffic (Docker, VMs): allowed from inside, allowed from the internet only through Cloudflare on the web ports. "The internet" is every interface with a default route, IPv4 or IPv6; traffic arriving on another interface, such as a second public NIC without a default route, counts as inside
 - outbound: allowed
 
 See it for yourself before applying: `secure-setup render`.
@@ -202,7 +206,10 @@ non-zero. The server is in its previous state.
   from the tailnet and, from the internet, only through Cloudflare on the web
   ports. Docker's own iptables rules stay; both rulesets must accept a packet.
 - **Tailscale SSH** (optional): logs you in with your tailnet identity instead
-  of keys. Your keys keep working too.
+  of keys. Your keys keep working too. It is switched on with
+  `tailscale set --ssh` only once the tailnet is known to be yours: your
+  computer reached the server over it, or you confirmed its name on the
+  server.
 - **Non-Tailscale private networks**: set `use_existing_network`,
   `admin_address` and `admin_interface` in the plan file to use a provider
   private network or a WireGuard peer instead. Tailscale is then not installed.
