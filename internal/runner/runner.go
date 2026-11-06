@@ -170,7 +170,7 @@ func New(o Options) *Runner {
 			}
 			return ""
 		}, run: r.hardenSSH},
-		{name: "Set up Cloudflare Tunnel", skip: r.skipTunnel, run: func(ctx context.Context, log func(string)) error {
+		{name: "Cloudflare Tunnel", run: func(ctx context.Context, log func(string)) error {
 			return r.setupTunnel(ctx, r.admin, log)
 		}},
 		{name: "Stage the firewall", run: r.stageFirewall},
@@ -596,16 +596,13 @@ func (r *Runner) resumeTailscaleSSH(log func(string)) {
 	r.tsSSHPaused = false
 }
 
-func (r *Runner) skipTunnel() string {
-	if !r.o.Plan.Firewall.CloudflareTunnel {
-		return "not requested"
-	}
-	return ""
-}
-
 // setupTunnel installs cloudflared and connects the tunnel before the
-// firewall changes: with a tunnel no web port is opened at all.
+// firewall changes: with a tunnel no web port is opened at all. A plan
+// without one removes the tunnel an earlier run set up.
 func (r *Runner) setupTunnel(ctx context.Context, host remote.Host, log func(string)) error {
+	if !r.o.Plan.Firewall.CloudflareTunnel {
+		return remote.RemoveTunnel(ctx, host, log)
+	}
 	if err := remote.InstallCloudflared(ctx, host, r.facts, log); err != nil {
 		return err
 	}

@@ -161,7 +161,7 @@ func TestStepOrder(t *testing.T) {
 	p := plan.Default()
 	remoteSteps := New(Options{Plan: &p}).Steps()
 	n := len(remoteSteps)
-	if !before(remoteSteps, "Set up Cloudflare Tunnel", "Stage the firewall") {
+	if !before(remoteSteps, "Cloudflare Tunnel", "Stage the firewall") {
 		t.Fatalf("remote steps: %q", remoteSteps)
 	}
 	if remoteSteps[1] != "Update the system" || remoteSteps[n-2] != "Turn on Tailscale SSH" || remoteSteps[n-1] != "Reboot and check" {

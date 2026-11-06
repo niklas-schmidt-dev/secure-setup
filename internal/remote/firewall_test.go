@@ -421,13 +421,13 @@ func TestSetupTunnelKeepsTokenOffCommandLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	unit := h.files[unitDir+TunnelUnit+".service"]
-	if h.files[TunnelTokenPath] != token+"\n" || !strings.Contains(unit, "ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:20241 run --token-file "+TunnelTokenPath) {
+	if h.files[TunnelTokenPath] != token+"\n" || !strings.Contains(unit, "ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:20290 run --token-file "+TunnelTokenPath) {
 		t.Fatalf("token file %q unit %q", h.files[TunnelTokenPath], unit)
 	}
 	if strings.Contains(unit, token) || strings.Contains(h.all(), token) {
 		t.Fatal("the token reached a script or the unit")
 	}
-	if !strings.Contains(h.all(), "/ready") || !strings.Contains(h.all(), "systemctl disable --now "+TunnelUnit) {
+	if !strings.Contains(h.all(), "/ready") || !strings.Contains(h.all(), `grep -q "pid=$pid,"`) || !strings.Contains(h.all(), "systemctl disable --now "+TunnelUnit) {
 		t.Fatal("setup does not wait for the tunnel connection, or leaves a failed tunnel running")
 	}
 }
@@ -459,5 +459,30 @@ func TestInstallCloudflared(t *testing.T) {
 	h := &recordHost{output: func(string) string { return "/usr/bin/cloudflared" }}
 	if err := InstallCloudflared(context.Background(), h, &Facts{PkgMgr: "apt-get"}, func(string) {}); err != nil || len(h.scripts) != 0 {
 		t.Fatalf("installed again: %v %q", err, h.scripts)
+	}
+	// cloudflared present but curl missing: the readiness check needs curl.
+	nc := &noCurlHost{}
+	if err := InstallCloudflared(context.Background(), nc, &Facts{PkgMgr: "pacman"}, func(string) {}); err != nil || !strings.Contains(nc.all(), "pacman -Sy --noconfirm --needed curl") {
+		t.Fatalf("curl not installed: %v %s", err, nc.all())
+	}
+}
+
+type noCurlHost struct{ recordHost }
+
+func (h *noCurlHost) Output(_ context.Context, cmd string) (string, error) {
+	if strings.Contains(cmd, "command -v curl") {
+		return "", errors.New("exit status 1")
+	}
+	return "/usr/bin/cloudflared", nil
+}
+
+// A plan without a tunnel takes down the tunnel service of an earlier run.
+func TestRemoveTunnel(t *testing.T) {
+	h := &recordHost{}
+	if err := RemoveTunnel(context.Background(), h, nil); err != nil {
+		t.Fatal(err)
+	}
+	if s := h.all(); !strings.Contains(s, "systemctl disable --now "+TunnelUnit+".service") || !strings.Contains(s, "rm -f "+unitDir+TunnelUnit+".service "+TunnelTokenPath) {
+		t.Fatalf("script %s", s)
 	}
 }
