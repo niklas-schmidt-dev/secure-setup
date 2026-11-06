@@ -7,6 +7,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os/exec"
 	"slices"
 	"strconv"
@@ -62,6 +63,7 @@ type Facts struct {
 	SSHPort    int
 	WANIface   string
 	WANIfaces  []string // every device with a default route (IPv4 and IPv6), WANIface first
+	PublicNICs []string // network cards with a public address, with or without a default route
 	WANIPv4    string   // first IPv4 address on WANIface, when known
 	Docker     bool
 
@@ -100,6 +102,7 @@ printf 'WAN6=%s\n' "$(ip -o -6 route show default 2>/dev/null | awk '{for(i=1;i<
 printf 'WANS=%s\n' "$({ ip -o -4 route show default; ip -o -6 route show default; } 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); break}}' | tr '\n' ' ')"
 wan=$(ip -o -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
 if [ -n "$wan" ]; then printf 'WANIP=%s\n' "$(ip -o -4 addr show dev "$wan" 2>/dev/null | awk '{print $4; exit}' | cut -d/ -f1)"; fi
+printf 'NICADDRS=%s\n' "$(ip -o addr show scope global 2>/dev/null | while read -r _ dev _ addr _; do if [ -e "/sys/class/net/$dev/device" ]; then printf '%s %s ' "$dev" "$addr"; fi; done)"
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then echo UFW=1; else echo UFW=0; fi
 if systemctl is-active --quiet firewalld 2>/dev/null; then echo FIREWALLD=1; else echo FIREWALLD=0; fi
 if systemctl is-enabled --quiet firewalld 2>/dev/null; then echo FIREWALLD_ENABLED=1; else echo FIREWALLD_ENABLED=0; fi
@@ -147,6 +150,7 @@ func Detect(ctx context.Context, c Host) (*Facts, error) {
 			f.WANIfaces = append(f.WANIfaces, n)
 		}
 	}
+	f.PublicNICs = publicNICs(strings.Fields(kv["NICADDRS"]))
 	if f.PrettyName == "" {
 		f.PrettyName = "unknown Linux"
 	}
@@ -166,6 +170,32 @@ func Detect(ctx context.Context, c Host) (*Facts, error) {
 		}
 	}
 	return f, nil
+}
+
+// publicNICs picks the network cards that carry a public address from pairs
+// of device and address. A second uplink without a default route is still
+// on the internet. Bridges, veths, VPN and tunnel devices are not cards
+// (no /sys/class/net/DEV/device), so container and VM traffic stays inside
+// even on a public prefix.
+func publicNICs(pairs []string) []string {
+	var out []string
+	for i := 0; i+1 < len(pairs); i += 2 {
+		dev, addr := pairs[i], pairs[i+1]
+		p, err := netip.ParsePrefix(addr)
+		if err != nil || !publicAddr(p.Addr()) || slices.Contains(out, dev) {
+			continue
+		}
+		out = append(out, dev)
+	}
+	return out
+}
+
+// sharedSpace is 100.64.0.0/10: carrier-grade NAT, and Tailscale's IPv4 range.
+var sharedSpace = netip.MustParsePrefix("100.64.0.0/10")
+
+func publicAddr(a netip.Addr) bool {
+	a = a.Unmap()
+	return a.IsGlobalUnicast() && !a.IsPrivate() && !sharedSpace.Contains(a)
 }
 
 // InstallPackages installs packages with the detected package manager.
