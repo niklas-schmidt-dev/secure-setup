@@ -1,0 +1,43 @@
+# Drives `secure-setup here` (the wizard) like here-tui.exp, but presses
+# ctrl+c while the run waits for the confirming login. The wizard must stay
+# open until the run has undone its sshd change, then exit with 130.
+set timeout 60
+# The server's private address, passed in by run-here.sh, dots escaped.
+set prv [string map {. {\.}} $env(E2E_PRIVATE_IP)]
+log_user 1
+spawn secure-setup here -f /root/plan-login.json
+stty rows 40 columns 120 < $spawn_out(slave,name)
+expect {
+  -re {Firewall} { puts "\nWALK: firewall screen" }
+  timeout { puts "\nWALK: FAIL no firewall screen"; exit 1 }
+}
+foreach i {1 2 3 4 5 6 7 8} { sleep 0.4; send "\r" }
+expect {
+  -re {Apply this setup now} { sleep 0.4; send "y" }
+  timeout { puts "\nWALK: FAIL no apply question"; exit 1 }
+}
+set timeout 120
+expect {
+  -re "ssh root@$prv" { puts "\nWALK: waiting for login" }
+  timeout { puts "\nWALK: FAIL run never asked for a login"; exit 1 }
+}
+sleep 1
+send "\x03"
+expect {
+  -re {Stopping} { puts "\nWALK: stopping" }
+  eof { puts "\nWALK: FAIL the wizard quit without waiting for the cleanup"; exit 1 }
+  timeout { puts "\nWALK: FAIL no stopping notice"; exit 1 }
+}
+expect {
+  -re {password login restored} { puts "\nWALK: cleanup ran" }
+  eof { puts "\nWALK: FAIL the wizard quit before the cleanup finished"; exit 1 }
+  timeout { puts "\nWALK: FAIL the cleanup never reported"; exit 1 }
+}
+expect {
+  -re {press q to exit} { sleep 0.4; send "q" }
+  eof { puts "\nWALK: FAIL no done screen"; exit 1 }
+  timeout { puts "\nWALK: FAIL no done screen"; exit 1 }
+}
+expect eof
+lassign [wait] pid spawnid os_error status
+puts "\nWALK: exit $status"

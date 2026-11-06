@@ -57,22 +57,34 @@ func RunHere(ctx context.Context, p *plan.Plan, version string, host *localhost.
 }
 
 func run(ctx context.Context, p *plan.Plan, version string, local *localhost.Host) error {
-	ctx, cancel := context.WithCancel(ctx)
+	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	m := newModel(ctx, cancel, p, version)
+	m := newModel(runCtx, cancel, p, version)
 	if local != nil {
 		m.local = local
 		m.phase = phasePreflight
 		m.form = nil
 	}
-	prog := tea.NewProgram(m, tea.WithContext(ctx), tea.WithAltScreen())
+	// The program ends only through the model: a cancelled run still cleans
+	// up, and the wizard waits for it. So no WithContext and no signal
+	// handler of its own; a signal reaches the model as abortMsg.
+	prog := tea.NewProgram(m, tea.WithAltScreen(), tea.WithoutSignalHandler())
 	m.send = prog.Send
+	stop := context.AfterFunc(ctx, func() { prog.Send(abortMsg{}) })
+	defer stop()
 	final, err := prog.Run()
 	if err != nil {
 		return err
 	}
-	if fm, ok := final.(*model); ok && fm.runErr != nil {
+	fm, ok := final.(*model)
+	if !ok {
+		return nil
+	}
+	if fm.runErr != nil {
 		return fm.runErr
+	}
+	if fm.aborted && fm.result == nil {
+		return context.Canceled
 	}
 	return nil
 }
@@ -119,6 +131,9 @@ type model struct {
 	promptText string
 
 	// run screen
+	running    bool // the runner has not returned yet
+	aborted    bool // ctrl+c, a signal, or No on the review
+	signalled  bool // a signal, not a person: leave once the run has returned
 	steps      []string
 	states     []stepState
 	skipReason []string
@@ -405,6 +420,9 @@ type runDoneMsg struct {
 	err    error
 }
 
+// abortMsg is a SIGINT or SIGTERM; it acts like ctrl+c.
+type abortMsg struct{}
+
 // ---- tea.Model ----
 
 func (m *model) Init() tea.Cmd {
@@ -427,11 +445,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vp.GotoBottom()
 		return m, nil
 
+	case abortMsg:
+		m.signalled = true
+		return m.abort()
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
-			m.cancel()
-			return m, tea.Quit
+			return m.abort()
 		case "q", "enter", "esc":
 			if m.phase == phaseDone {
 				return m, tea.Quit
@@ -444,6 +465,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case promptMsg:
+		if m.aborted {
+			// Asked before the cancel arrived; nobody waits for the answer.
+			msg.reply <- promptReply{abort: true}
+			return m, nil
+		}
 		pm := msg
 		m.prompt = &pm
 		m.promptOK, m.promptText = false, ""
@@ -488,7 +514,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case runDoneMsg:
 		m.result, m.runErr = msg.result, msg.err
+		m.running = false
+		m.prompt, m.promptForm = nil, nil
 		m.phase = phaseDone
+		if m.signalled {
+			return m, tea.Quit
+		}
 		return m, nil
 	}
 
@@ -518,12 +549,27 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	switch m.form.State {
 	case huh.StateAborted:
-		m.cancel()
-		return m, tea.Quit
+		return m.abort()
 	case huh.StateCompleted:
 		return m.advance()
 	}
 	return m, cmd
+}
+
+// abort answers ctrl+c and signals. Outside a run the wizard ends at once.
+// A running setup is cancelled, and the wizard stays until the runner has
+// undone what it can; a second ctrl+c leaves without waiting.
+func (m *model) abort() (tea.Model, tea.Cmd) {
+	m.cancel()
+	if !m.running || m.aborted {
+		m.aborted = true
+		return m, tea.Quit
+	}
+	m.aborted = true
+	// The cancel answered the runner's open question, if there was one.
+	m.prompt, m.promptForm = nil, nil
+	m.addLog("stopping: undoing what this run changed")
+	return m, nil
 }
 
 // advance moves from a completed form to the next phase.
@@ -598,8 +644,7 @@ func (m *model) advance() (tea.Model, tea.Cmd) {
 
 	case phaseReview:
 		if !m.confirmed {
-			m.cancel()
-			return m, tea.Quit
+			return m.abort()
 		}
 		m.phase = phaseRun
 		m.form = nil
@@ -682,6 +727,7 @@ func (m *model) startRun() tea.Cmd {
 	m.states = make([]stepState, len(m.steps))
 	m.skipReason = make([]string, len(m.steps))
 	m.vp.Height = clamp(m.height-len(m.steps)-12, 4, 30)
+	m.running = true
 	ctx := m.ctx
 	return func() tea.Msg {
 		res, err := r.Run(ctx)
@@ -789,7 +835,7 @@ func (m *model) runView() string {
 		}
 		fmt.Fprintf(&b, " %s %s\n", mark, text)
 	}
-	if n := len(m.attention); n > 0 {
+	if n := len(m.attention); n > 0 && !m.aborted {
 		b.WriteString("\n")
 		b.WriteString(attentionBox.Width(clamp(m.width-2, 20, 100)).Render(m.attention[n-1]))
 		b.WriteString("\n")
@@ -797,7 +843,11 @@ func (m *model) runView() string {
 	b.WriteString("\n")
 	b.WriteString(boxStyle.Width(m.vp.Width).Render(logStyle.Render(m.vp.View())))
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("ctrl+c aborts; a rollback timer protects the server during the firewall steps"))
+	if m.aborted {
+		b.WriteString(warnStyle.Render("Stopping: undoing what this run changed. ctrl+c again leaves without waiting."))
+	} else {
+		b.WriteString(mutedStyle.Render("ctrl+c aborts; a rollback timer protects the server during the firewall steps"))
+	}
 	return b.String()
 }
 
@@ -806,7 +856,11 @@ func (m *model) doneView() string {
 	b.WriteString(headerStyle.Render(titleStyle.Render("secure-setup") + mutedStyle.Render("  "+m.target())))
 	b.WriteString("\n")
 	if m.runErr != nil {
-		b.WriteString(errorBox.Width(clamp(m.width-2, 20, 100)).Render(errStyle.Render("Setup did not finish\n\n") + runner.Printable(m.runErr.Error())))
+		title, again := "Setup did not finish", "Fix the cause and run again with:  "
+		if m.aborted {
+			title, again = "Setup stopped", "Run it again with:  "
+		}
+		b.WriteString(errorBox.Width(clamp(m.width-2, 20, 100)).Render(errStyle.Render(title+"\n\n") + runner.Printable(m.runErr.Error())))
 		b.WriteString("\n\n")
 		b.WriteString("Last output:\n")
 		tail := m.logs
@@ -815,10 +869,13 @@ func (m *model) doneView() string {
 		}
 		b.WriteString(logStyle.Render(strings.Join(tail, "\n")))
 		b.WriteString("\n\n")
+		if m.aborted {
+			b.WriteString("A firewall still waiting for its confirmation goes back to the previous rules when its rollback timer fires.\n")
+		}
 		if m.savedPath != "" && m.local != nil {
-			b.WriteString("Fix the cause and run again with:  secure-setup here -f " + m.savedPath + "\n")
+			b.WriteString(again + "secure-setup here -f " + m.savedPath + "\n")
 		} else if m.savedPath != "" {
-			b.WriteString("Fix the cause and run again with:  secure-setup apply -f " + m.savedPath + "\n")
+			b.WriteString(again + "secure-setup apply -f " + m.savedPath + "\n")
 		}
 	} else {
 		if m.local != nil {
