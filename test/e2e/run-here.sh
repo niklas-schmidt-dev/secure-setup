@@ -35,7 +35,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$bin" .
 echo "== start server and client"
 d network create --subnet "${E2E_SUBNET_PUBLIC:-10.250.100.0/24}" "$pub" >/dev/null
 d network create --subnet "${E2E_SUBNET_PRIVATE:-10.250.101.0/24}" "$prv" >/dev/null
-d run -d --name "$srv" --privileged --hostname here-vps --network "$pub" secure-setup-e2e-server >/dev/null
+d run -d --name "$srv" --restart unless-stopped --privileged --hostname here-vps --network "$pub" secure-setup-e2e-server >/dev/null
 d network connect "$prv" "$srv"
 d run -d --name "$cli" --network "$pub" secure-setup-e2e-client >/dev/null
 d network connect "$prv" "$cli"
@@ -58,6 +58,7 @@ plan() {
 {
   "local": true,
   "update_system": false,
+  "reboot": false,
   "tailscale": {"admin_interface": "eth1", "udp_port": 41641, "use_existing_network": true, "admin_address": "$prvip"},
   "firewall": {"web_ports": [443], "allow_ping": true, "tailnet_ports": [22, 8080], "rollback_seconds": 30, "cloudflare_sync": true, "confirm_by": "$2"},
   "ssh": {"harden": true, "add_local_key": true}
@@ -157,6 +158,19 @@ d exec "$srv" grep -q "EXIT=0" /root/run5.log || { d exec "$srv" tail -40 /root/
 d exec "$srv" grep -q '"confirm_by": "login"' /etc/secure-setup/plan.json || fail "TUI did not save the local plan"
 d exec "$srv" grep -q '"local": true' /etc/secure-setup/plan.json || fail "saved plan is not marked local"
 echo "   TUI walked all screens, saved /etc/secure-setup/plan.json, confirmed by login"
+
+echo "== run 6: reboot at the end; the boot check reports after the restart"
+d exec "$srv" sh -c 'sed "s/\"reboot\": false/\"reboot\": true/" /root/plan-self.json > /root/plan-reboot.json'
+d exec "$srv" rm -f /var/log/secure-setup-bootcheck.log
+d exec -d "$srv" sh -c 'secure-setup here -f /root/plan-reboot.json --yes > /root/run6.log 2>&1'
+wait_log /root/run6.log "reboots in 15 seconds" 90
+d exec "$srv" grep -q "This machine is locked down" /root/run6.log || fail "run 6 did not finish before the reboot"
+wait_log /var/log/secure-setup-bootcheck.log "secure-setup: after the reboot" 240
+d exec "$srv" grep -q "all checks passed" /var/log/secure-setup-bootcheck.log || { d exec "$srv" cat /var/log/secure-setup-bootcheck.log; fail "boot check found problems"; }
+d exec "$srv" grep -q "all checks passed" /etc/motd.d/secure-setup || fail "login message missing"
+d exec "$srv" systemctl is-enabled --quiet secure-setup-bootcheck.service && fail "boot check still enabled"
+d exec "$srv" nft list table inet secure_setup >/dev/null || fail "rules not loaded after the reboot"
+echo "   rebooted; the boot check passed, wrote the log and the login message, and disabled itself"
 
 echo "== undo --here"
 d exec "$srv" secure-setup undo --here --yes 2>&1 | sed 's/^/   /'

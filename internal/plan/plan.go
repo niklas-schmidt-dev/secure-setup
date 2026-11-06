@@ -21,11 +21,14 @@ type Plan struct {
 	// (`secure-setup here`); Server is then unused.
 	Local bool `json:"local,omitempty"`
 	// UpdateSystem installs pending package updates before anything else.
-	UpdateSystem bool      `json:"update_system"`
-	Server       Server    `json:"server"`
-	Tailscale    Tailscale `json:"tailscale"`
-	Firewall     Firewall  `json:"firewall"`
-	SSH          SSH       `json:"ssh"`
+	UpdateSystem bool `json:"update_system"`
+	// Reboot restarts the server at the end and checks that the lockdown
+	// comes back on its own.
+	Reboot    bool      `json:"reboot"`
+	Server    Server    `json:"server"`
+	Tailscale Tailscale `json:"tailscale"`
+	Firewall  Firewall  `json:"firewall"`
+	SSH       SSH       `json:"ssh"`
 }
 
 // Confirmation modes for a local run.
@@ -90,6 +93,7 @@ type SSH struct {
 func Default() Plan {
 	return Plan{
 		UpdateSystem: true,
+		Reboot:       true,
 		Server:       Server{Port: 22, User: "root"},
 		Tailscale:    Tailscale{AdminInterface: "tailscale0", UDPPort: 41641},
 		Firewall: Firewall{

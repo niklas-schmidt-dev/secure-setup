@@ -1,0 +1,249 @@
+package runner
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/niklas-schmidt-dev/secure-setup/internal/remote"
+	"github.com/niklas-schmidt-dev/secure-setup/internal/sshx"
+)
+
+// BootExpect is what the server showed just before the reboot, and must show
+// again afterwards without anyone touching it.
+type BootExpect struct {
+	Tailscale    bool   `json:"tailscale"`
+	TailscaleSSH bool   `json:"tailscale_ssh"`
+	Hardened     bool   `json:"hardened"`
+	User         string `json:"user"`
+	AdminAddress string `json:"admin_address"`
+	SSHPort      int    `json:"ssh_port"`
+}
+
+func (r *Runner) bootExpect(ctx context.Context, host remote.Host) BootExpect {
+	p := r.o.Plan
+	user := p.Server.User
+	if user == "" {
+		user = "root"
+	}
+	e := BootExpect{
+		Tailscale:    !p.Tailscale.UseExisting,
+		Hardened:     r.result.Hardened,
+		User:         user,
+		AdminAddress: r.result.AdminAddress,
+		SSHPort:      r.facts.SSHPort,
+	}
+	if e.Tailscale {
+		e.TailscaleSSH = remote.TailscaleSSHOn(ctx, host)
+	}
+	return e
+}
+
+// CheckLockdown lists what is wrong with the lockdown on host; empty means
+// the rules are loaded and enabled at boot, Tailscale is up in the expected
+// SSH mode, and sshd still refuses passwords.
+func CheckLockdown(ctx context.Context, host remote.Host, e BootExpect) []string {
+	var problems []string
+	if _, err := host.Output(ctx, "nft list table inet secure_setup"); err != nil {
+		problems = append(problems, "the firewall rules are not loaded")
+	}
+	if out, _ := host.Output(ctx, "systemctl is-enabled nftables 2>/dev/null || true"); strings.TrimSpace(out) != "enabled" {
+		problems = append(problems, "nftables.service is not enabled at boot")
+	}
+	if e.Tailscale {
+		st, err := remote.TailscaleStatus(ctx, host)
+		switch {
+		case err != nil:
+			problems = append(problems, "tailscale does not answer ("+shortErr(err)+")")
+		case st.BackendState != "Running":
+			problems = append(problems, "tailscale is in state "+st.BackendState)
+		}
+		if on := remote.TailscaleSSHOn(ctx, host); on != e.TailscaleSSH {
+			problems = append(problems, fmt.Sprintf("Tailscale SSH is %s, it was %s before the reboot", onOff(on), onOff(e.TailscaleSSH)))
+		}
+	}
+	if e.Hardened {
+		if err := remote.VerifySSHD(ctx, host, e.User, e.AdminAddress, e.SSHPort, keysOnlyPeers...); err != nil {
+			problems = append(problems, shortErr(err))
+		}
+	}
+	return problems
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
+// rebootAndCheck reboots the server as the last step and checks, over the
+// private network and from the outside, that the lockdown came back on its
+// own. A reboot is the real test of what was persisted.
+func (r *Runner) rebootAndCheck(ctx context.Context, log func(string)) error {
+	expect := r.bootExpect(ctx, r.pub)
+	before, err := remote.BootMark(ctx, r.pub)
+	if err != nil {
+		return err
+	}
+	if err := remote.ScheduleReboot(ctx, r.pub, 3, log); err != nil {
+		return err
+	}
+	r.admin.Close()
+	r.pub.Close()
+	port := r.facts.SSHPort
+	if expect.TailscaleSSH {
+		port = 22 // Tailscale SSH answers on the tailnet address
+	}
+	target := net.JoinHostPort(r.result.AdminAddress, fmt.Sprint(port))
+	log("waiting for the server to come back on " + target)
+	deadline := time.Now().Add(5 * time.Minute)
+	for {
+		if time.Now().After(deadline) {
+			return errors.New("the server did not come back over the private network within 5 minutes after the reboot; check it in the provider's console")
+		}
+		if err := sleepCtx(ctx, 5*time.Second); err != nil {
+			return err
+		}
+		d := net.Dialer{Timeout: 5 * time.Second}
+		conn, err := d.DialContext(ctx, "tcp", target)
+		if err != nil {
+			continue
+		}
+		conn.Close()
+		auth := r.auth()
+		auth.Password = ""
+		if expect.TailscaleSSH {
+			auth.Banner = func(msg string) { r.attention("Tailscale SSH: " + strings.TrimSpace(msg)) }
+		}
+		dctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+		c, err := sshx.Dial(dctx, target, auth, sshx.HostKeyPolicy{Expect: r.hostKey, Warn: log})
+		cancel()
+		if err != nil {
+			log("not back yet: " + shortErr(err))
+			continue
+		}
+		if err := c.EnsureRoot(ctx); err != nil {
+			c.Close()
+			return err
+		}
+		mark, err := remote.BootMark(ctx, c)
+		if err != nil || mark == before {
+			c.Close() // still the old boot: the reboot has not begun
+			continue
+		}
+		r.admin = c
+		break
+	}
+	log("the server rebooted and is reachable over the private network again")
+	problems := CheckLockdown(ctx, r.admin, expect)
+	if r.result.PublicSSHClosed {
+		if open, _ := r.publicSSHOpen(ctx); open {
+			problems = append(problems, "a new connection to "+r.o.Plan.Address()+" succeeds again")
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("after the reboot: %s. The server stays in this state; check it over the tailnet or in the provider's console", strings.Join(problems, "; "))
+	}
+	r.result.RebootChecked = true
+	r.result.RebootNeeded = false
+	log("after the reboot: rules loaded, nftables enabled at boot, " + map[bool]string{true: "Tailscale running, ", false: ""}[expect.Tailscale] + map[bool]string{true: "sshd keys only, ", false: ""}[expect.Hardened] + "public SSH blocked")
+	return nil
+}
+
+// hereReboot sets up the check that runs once after the next boot and then
+// reboots this machine: this process cannot watch its own reboot.
+func (r *Runner) hereReboot(ctx context.Context, log func(string)) error {
+	exe, err := os.Executable()
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
+	}
+	if err != nil {
+		return fmt.Errorf("find the secure-setup binary: %w", err)
+	}
+	expect, err := json.Marshal(r.bootExpect(ctx, r.local))
+	if err != nil {
+		return err
+	}
+	if err := remote.InstallBootCheck(ctx, r.local, exe, expect, log); err != nil {
+		return err
+	}
+	if err := remote.ScheduleReboot(ctx, r.local, 15, log); err != nil {
+		return err
+	}
+	r.result.RebootScheduled = true
+	r.result.RebootNeeded = false
+	r.attention("this machine reboots in 15 seconds. The check after the boot writes " + remote.BootCheckLog + " and the message shown at your next login")
+	return nil
+}
+
+// BootCheck runs once after a reboot that a local run scheduled (`secure-setup
+// boot-check`, started by its systemd unit). It repeats the checks until they
+// pass or two minutes are up, records the result in the log and the login
+// message, and disables itself.
+func BootCheck(ctx context.Context, host remote.Host) (string, error) {
+	data, err := os.ReadFile(bootCheckExpectPath)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", bootCheckExpectPath, err)
+	}
+	var e BootExpect
+	if err := json.Unmarshal(data, &e); err != nil {
+		return "", fmt.Errorf("parse %s: %w", bootCheckExpectPath, err)
+	}
+	deadline := time.Now().Add(bootCheckWait)
+	var problems []string
+	for {
+		problems = CheckLockdown(ctx, host, e)
+		if len(problems) == 0 || time.Now().After(deadline) {
+			break
+		}
+		if err := sleepCtx(ctx, 5*time.Second); err != nil {
+			return "", err
+		}
+	}
+	msg := "secure-setup: after the reboot (" + time.Now().UTC().Format(time.RFC3339) + "): "
+	if len(problems) == 0 {
+		msg += "all checks passed: rules loaded, nftables enabled at boot"
+		if e.Tailscale {
+			msg += ", Tailscale running"
+		}
+		if e.Hardened {
+			msg += ", sshd keys only"
+		}
+	} else {
+		msg += "PROBLEMS: " + strings.Join(problems, "; ")
+	}
+	msg += "\n"
+	if err := host.WriteFile(ctx, remote.BootCheckLog, []byte(msg), "0644"); err != nil {
+		return msg, err
+	}
+	if err := host.WriteFile(ctx, remote.BootCheckMotd, []byte(msg), "0644"); err != nil {
+		return msg, err
+	}
+	_, _ = host.Output(ctx, "systemctl disable "+remote.BootCheckUnit+".service")
+	if len(problems) > 0 {
+		return msg, errors.New(strings.TrimSpace(msg))
+	}
+	return msg, nil
+}
+
+// Overridden in tests.
+var (
+	bootCheckExpectPath = remote.BootCheckExpectPath
+	bootCheckWait       = 2 * time.Minute
+)
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
+}

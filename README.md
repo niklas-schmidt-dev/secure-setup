@@ -27,6 +27,10 @@ Either way the guided wizard:
    tailnet connection, and only then makes them permanent
 6. verifies from your machine that a new connection to the public SSH port is
    blocked
+7. reboots and checks that everything came back on its own: rules loaded,
+   nftables enabled at boot, Tailscale running, sshd keys only, public SSH
+   still blocked (the wizard asks, yes by default; `"reboot": false` in a
+   plan skips it)
 
 If the new rules cannot be confirmed in time (typo in an interface name, tailnet
 down, anything), the server restores its previous firewall by itself. You are
@@ -143,6 +147,13 @@ differ in who proves that the new rules let you in:
   cannot see is your tailnet ACL. If that blocks SSH to the new node, fix the
   ACL; the server is intact and the provider console remains the back door.
 
+The reboot at the end is the real test of what was made permanent. From your
+computer secure-setup waits for the server to come back over the tailnet and
+checks it again; on the server itself it cannot watch its own reboot, so a
+one-shot service does the same checks after the boot and leaves the result in
+the log and the login message. The rollback timer no longer covers this
+step: if something did not come back, use the provider console.
+
 ## What ends up on the server
 
 | Path | Purpose |
@@ -153,6 +164,7 @@ differ in who proves that the new rules let you in:
 | `/etc/ssh/sshd_config.d/00-secure-setup.conf` | password login off, root login with keys only |
 | `/var/lib/secure-setup/` | rollback script and the previous ruleset; `rolled-back` appears if a rollback ever fired |
 | `/etc/secure-setup/plan.json` | the answers of a `here` run, for `secure-setup here -f` next time |
+| `secure-setup-bootcheck.service` | after a `here` run's reboot: checks the lockdown once, writes `/var/log/secure-setup-bootcheck.log` and `/etc/motd.d/secure-setup` (shown at login), then disables itself |
 
 ufw or firewalld, when active, keep running until the new rules go live under
 the rollback timer; a rollback starts them again. ufw's rules are only

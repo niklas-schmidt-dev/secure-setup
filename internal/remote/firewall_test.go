@@ -385,3 +385,23 @@ func TestUpdateSystem(t *testing.T) {
 		t.Fatal("no package manager accepted")
 	}
 }
+
+// The boot check is a one-shot unit that runs the installed binary; a path
+// that would need quoting in the unit is refused.
+func TestInstallBootCheck(t *testing.T) {
+	h := &recordHost{}
+	if err := InstallBootCheck(context.Background(), h, "/usr/local/bin/secure-setup", []byte("{}"), nil); err != nil {
+		t.Fatal(err)
+	}
+	unit := h.files[unitDir+BootCheckUnit+".service"]
+	if !strings.Contains(unit, "ExecStart=/usr/local/bin/secure-setup boot-check") || !strings.Contains(unit, "Type=oneshot") || h.files[BootCheckExpectPath] != "{}" || !strings.Contains(h.all(), "systemctl enable "+BootCheckUnit) {
+		t.Fatalf("unit %q scripts %q", unit, h.all())
+	}
+	if err := InstallBootCheck(context.Background(), &recordHost{}, "/tmp/my dir/secure-setup", nil, nil); err == nil {
+		t.Fatal("a path with a space was accepted")
+	}
+	h = &recordHost{}
+	if err := ScheduleReboot(context.Background(), h, 15, nil); err != nil || !strings.Contains(h.all(), "systemd-run --quiet --unit=secure-setup-reboot --on-active=15") {
+		t.Fatalf("reboot: %v %s", err, h.all())
+	}
+}

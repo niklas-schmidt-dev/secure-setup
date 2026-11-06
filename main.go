@@ -54,6 +54,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdApply(ctx, args[1:])
 	case "render":
 		return cmdRender(args[1:])
+	case "boot-check":
+		return cmdBootCheck(ctx)
 	case "undo":
 		return cmdUndo(ctx, args[1:])
 	case "version", "--version", "-v":
@@ -259,6 +261,7 @@ func describe(p *plan.Plan) string {
 	fmt.Fprintf(&b, "  ping            %v\n", p.Firewall.AllowPing)
 	fmt.Fprintf(&b, "  sshd keys only  %v\n", p.SSH.Harden)
 	fmt.Fprintf(&b, "  system update   %v\n", p.UpdateSystem)
+	fmt.Fprintf(&b, "  reboot + check  %v\n", p.Reboot)
 	fmt.Fprintf(&b, "  rollback        %ds\n", p.Firewall.RollbackSeconds)
 	if p.Firewall.WANInterface != "" {
 		fmt.Fprintf(&b, "  internet iface  %s (from the plan; checked against the server's default route)\n", p.Firewall.WANInterface)
@@ -339,12 +342,26 @@ if [ -e /var/lib/secure-setup/firewalld-retired ]; then
 	systemctl unmask firewalld >/dev/null 2>&1 || true
 	echo "firewalld unmasked; it was in use before secure-setup: start it again with: systemctl enable --now firewalld"
 fi
+systemctl disable secure-setup-bootcheck.service >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/secure-setup-bootcheck.service /etc/motd.d/secure-setup
 rm -rf /etc/secure-setup /var/lib/secure-setup
 if [ -f /etc/ssh/sshd_config.d/00-secure-setup.conf ] || grep -q '^# secure-setup: added the next line$' /etc/ssh/sshd_config 2>/dev/null; then
 ` + remote.RevertSSHDScript + `	echo "sshd hardening removed"
 fi
 echo "undo complete; Tailscale was left installed"
 `
+
+// cmdBootCheck runs once after a reboot that `secure-setup here` scheduled,
+// started by its systemd unit.
+func cmdBootCheck(ctx context.Context) error {
+	host, err := localhost.New(ctx)
+	if err != nil {
+		return err
+	}
+	msg, err := runner.BootCheck(ctx, host)
+	fmt.Print(msg)
+	return err
+}
 
 func cmdUndo(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("undo", flag.ContinueOnError)
