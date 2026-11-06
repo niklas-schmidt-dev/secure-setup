@@ -258,6 +258,7 @@ func describe(p *plan.Plan) string {
 	fmt.Fprintf(&b, "  web ports       TCP %s from Cloudflare\n", orNone(plan.FormatPorts(p.Firewall.WebPorts)))
 	fmt.Fprintf(&b, "  ping            %v\n", p.Firewall.AllowPing)
 	fmt.Fprintf(&b, "  sshd keys only  %v\n", p.SSH.Harden)
+	fmt.Fprintf(&b, "  system update   %v\n", p.UpdateSystem)
 	fmt.Fprintf(&b, "  rollback        %ds\n", p.Firewall.RollbackSeconds)
 	if p.Firewall.WANInterface != "" {
 		fmt.Fprintf(&b, "  internet iface  %s (from the plan; checked against the server's default route)\n", p.Firewall.WANInterface)

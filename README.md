@@ -16,14 +16,16 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-
 
 Either way the guided wizard:
 
-1. installs Tailscale and joins your tailnet (auth key or login link; after a
+1. updates the system packages first (`apt-get upgrade`, `dnf upgrade`, ...;
+   the wizard asks, yes by default, and says when a reboot is needed)
+2. installs Tailscale and joins your tailnet (auth key or login link; after a
    login link it checks that the tailnet is yours before going on)
-2. switches SSH to keys only, after installing and verifying your key
-3. installs an nftables firewall: SSH only over the tailnet, HTTPS only from
+3. switches SSH to keys only, after installing and verifying your key
+4. installs an nftables firewall: SSH only over the tailnet, HTTPS only from
    Cloudflare's published ranges, everything else dropped
-4. applies the rules with a rollback timer, confirms them over a fresh
+5. applies the rules with a rollback timer, confirms them over a fresh
    tailnet connection, and only then makes them permanent
-5. verifies from your machine that a new connection to the public SSH port is
+6. verifies from your machine that a new connection to the public SSH port is
    blocked
 
 If the new rules cannot be confirmed in time (typo in an interface name, tailnet
@@ -206,10 +208,13 @@ non-zero. The server is in its previous state.
   from the tailnet and, from the internet, only through Cloudflare on the web
   ports. Docker's own iptables rules stay; both rulesets must accept a packet.
 - **Tailscale SSH** (optional): logs you in with your tailnet identity instead
-  of keys. Your keys keep working too. It is switched on with
-  `tailscale set --ssh` only once the tailnet is known to be yours: your
-  computer reached the server over it, or you confirmed its name on the
-  server.
+  of keys. While it is on, tailscaled answers port 22 on the tailnet address
+  instead of sshd, so logins there follow your tailnet policy. It is switched
+  on with `tailscale set --ssh` only once the tailnet is known to be yours.
+  From your computer it is the last step, after every check against sshd,
+  and a fresh login through it must work (a browser check your policy asks
+  for is shown); otherwise it is switched off again and sshd with your key
+  stays in charge. On a rerun it is paused during the run.
 - **Non-Tailscale private networks**: set `use_existing_network`,
   `admin_address` and `admin_interface` in the plan file to use a provider
   private network or a WireGuard peer instead. Tailscale is then not installed.

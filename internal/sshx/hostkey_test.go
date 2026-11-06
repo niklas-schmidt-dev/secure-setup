@@ -21,6 +21,7 @@ type testServer struct {
 	addr      string
 	mu        sync.Mutex
 	passwords []string
+	banner    string
 }
 
 func (s *testServer) got() []string {
@@ -43,6 +44,11 @@ func startServer(t *testing.T, hostKey ssh.Signer) *testServer {
 		s.mu.Unlock()
 		return &ssh.Permissions{}, nil
 	}}
+	cfg.BannerCallback = func(ssh.ConnMetadata) string {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.banner
+	}
 	cfg.AddHostKey(hostKey)
 	go func() {
 		for {
@@ -179,5 +185,25 @@ func TestWriteFileScriptOrder(t *testing.T) {
 	}
 	if strings.Contains(s, "umask 022") || strings.Index(s, "chmod") > strings.Index(s, "mv -f") {
 		t.Fatalf("mode applied after the file is in place: %s", s)
+	}
+}
+
+// A login banner (Tailscale SSH's browser check) reaches Auth.Banner.
+func TestBannerReachesCaller(t *testing.T) {
+	key := newSigner(t)
+	srv := startServer(t, key)
+	srv.mu.Lock()
+	srv.banner = "To authenticate, visit: https://login.tailscale.com/a/check"
+	srv.mu.Unlock()
+	var got string
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	c, err := Dial(ctx, srv.addr, Auth{User: "root", Password: "pw", Banner: func(m string) { got = m }}, HostKeyPolicy{Expect: key.PublicKey()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	if !strings.Contains(got, "login.tailscale.com/a/check") {
+		t.Fatalf("banner %q", got)
 	}
 }

@@ -268,7 +268,11 @@ func (m *model) firewallForm() *huh.Form {
 				huh.NewOption("Self-checks only (unattended)", plan.ConfirmSelf),
 			).Value(&m.confirmBy))
 	}
-	return huh.NewForm(huh.NewGroup(fields...)).WithShowHelp(true)
+	// Its own page, so the firewall page still fits a small terminal.
+	update := huh.NewConfirm().Title("Update the system first?").
+		Description("Installs pending package updates (apt upgrade, dnf upgrade, ...) before anything else. Recommended.").
+		Affirmative("Yes").Negative("No").Value(&m.plan.UpdateSystem)
+	return huh.NewForm(huh.NewGroup(fields...), huh.NewGroup(update)).WithShowHelp(true)
 }
 
 func (m *model) reviewForm() *huh.Form {
@@ -311,6 +315,7 @@ func (m *model) summary() string {
 	}
 	line("Ping", yesNo(p.Firewall.AllowPing))
 	line("Password login", map[bool]string{true: "disabled (keys only)", false: "unchanged"}[p.SSH.Harden])
+	line("System update", map[bool]string{true: "first, before anything is installed", false: "skipped"}[p.UpdateSystem])
 	line("Everything else", "dropped")
 	line("Rollback window", fmt.Sprintf("%d seconds", p.Firewall.RollbackSeconds))
 	if m.local != nil {
@@ -855,6 +860,15 @@ func Summary(p *plan.Plan, r *runner.Result) string {
 		line("Password login", "disabled; keys only")
 	} else if r.HardenNote != "" {
 		line("Password login", warnStyle.Render("unchanged: "+r.HardenNote))
+	}
+	switch {
+	case r.TailscaleSSH == "on":
+		line("Tailscale SSH", "on: logins over the tailnet follow your tailnet policy")
+	case r.TailscaleSSH != "":
+		line("Tailscale SSH", warnStyle.Render(r.TailscaleSSH))
+	}
+	if r.RebootNeeded {
+		line("Reboot", warnStyle.Render("recommended: the system update needs it to finish"))
 	}
 	line("Rules", "/etc/nftables.conf (nft list ruleset)")
 	if len(r.WebPorts) > 0 {

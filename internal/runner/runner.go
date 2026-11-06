@@ -79,12 +79,15 @@ type Result struct {
 	Hardened        bool
 	HardenNote      string // why hardening was skipped, if it was
 	WebPorts        []int
+	RebootNeeded    bool   // the system update needs a reboot to finish
+	TailscaleSSH    string // "on", or why it stayed off; "" when not requested
 }
 
 // Runner executes one plan.
 type Runner struct {
 	o     Options
 	steps []step
+	cur   int // index of the running step
 
 	facts   *remote.Facts
 	pub     *sshx.Client
@@ -99,6 +102,7 @@ type Runner struct {
 	tsState    *remote.TSStatus
 	sshdPrev   string // the sshd drop-in an earlier run left; restored on failure
 
+	tsSSHPaused  bool // Tailscale SSH was on and is off for this run (remote mode)
 	joined       bool // this run joined the tailnet
 	joinedByLink bool // a login link was shown and the tailnet is not yet known to be the operator's
 }
@@ -135,6 +139,7 @@ func New(o Options) *Runner {
 	ts := &p.Tailscale
 	r.steps = []step{
 		{name: "Connect to the server", run: r.connect},
+		{name: "Update the system", skip: r.skipUpdate, run: r.updateSystem},
 		{name: "Install Tailscale", skip: func() string {
 			if ts.UseExisting {
 				return "using the existing private network " + ts.AdminAddress
@@ -164,6 +169,15 @@ func New(o Options) *Runner {
 		{name: "Apply the firewall with a rollback timer", run: r.applyFirewall},
 		{name: "Confirm over the private network", run: r.confirmFirewall},
 		{name: "Verify from the outside", run: r.verify},
+		{name: "Turn on Tailscale SSH", skip: func() string {
+			if ts.UseExisting {
+				return "no Tailscale"
+			}
+			if !ts.SSH && !r.tsSSHPaused {
+				return "not requested"
+			}
+			return ""
+		}, run: r.finishTailscaleSSH},
 	}
 	return r
 }
@@ -188,11 +202,13 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 				continue
 			}
 		}
+		r.cur = i
 		r.o.Report(Event{Kind: StepStart, Step: i})
 		log := func(line string) { r.o.Report(Event{Kind: Log, Step: i, Text: line}) }
 		if err := s.run(ctx, log); err != nil {
 			r.o.Report(Event{Kind: StepFailed, Step: i, Text: err.Error()})
 			r.revertLocalHardening(log)
+			r.resumeTailscaleSSH(log)
 			return nil, fmt.Errorf("%s: %w", s.name, err)
 		}
 		r.o.Report(Event{Kind: StepDone, Step: i})
@@ -221,8 +237,9 @@ func (r *Runner) revertLocalHardening(log func(string)) {
 	log("password login restored because the run did not complete")
 }
 
-func (r *Runner) attention(step int, text string) {
-	r.o.Report(Event{Kind: Attention, Step: step, Text: text})
+// attention reports something the operator must see, on the running step.
+func (r *Runner) attention(text string) {
+	r.o.Report(Event{Kind: Attention, Step: r.cur, Text: text})
 }
 
 func (r *Runner) auth() sshx.Auth {
@@ -295,10 +312,19 @@ func (r *Runner) connect(ctx context.Context, log func(string)) error {
 		log("a secure-setup firewall is already loaded; it will be replaced")
 	}
 	if f.RolledBack != "" {
-		r.attention(0, "an earlier secure-setup run rolled its firewall back at "+f.RolledBack+" UTC; this run starts fresh")
+		r.attention("an earlier secure-setup run rolled its firewall back at " + f.RolledBack + " UTC; this run starts fresh")
 	}
 	if f.Tailscale {
 		log("tailscale installed, state: " + orUnknown(f.TailscaleState))
+		// Tailscale SSH takes over port 22 on the tailnet address, where the
+		// run checks sshd; it comes back as the last step.
+		if !p.Tailscale.UseExisting && remote.TailscaleSSHOn(ctx, c) {
+			if err := remote.TailscaleSetSSH(ctx, c, false, log); err != nil {
+				return err
+			}
+			r.tsSSHPaused = true
+			log("Tailscale SSH is off for this run (it would take over port 22 on the tailnet address) and comes back at the end")
+		}
 	}
 	r.result.SSHPort = f.SSHPort
 	r.result.PublicAddress = p.Server.Host
@@ -375,7 +401,7 @@ func (r *Runner) joinTailnet(ctx context.Context, log func(string)) (err error) 
 	}
 	err = remote.TailscaleUp(ctx, host, remote.UpOptions{AuthKey: key, Hostname: p.Tailscale.Hostname}, log,
 		func(url string) {
-			r.attention(2, "Open this link in your browser to add the server to your tailnet:\n"+url)
+			r.attention("Open this link in your browser to add the server to your tailnet:\n" + url)
 		})
 	if err != nil {
 		return err
@@ -438,7 +464,11 @@ func (r *Runner) enableTailscaleSSH(ctx context.Context, host remote.Host, log f
 	if !r.joined || !r.o.Plan.Tailscale.SSH {
 		return nil
 	}
-	return remote.TailscaleSetSSH(ctx, host, log)
+	if err := remote.TailscaleSetSSH(ctx, host, true, log); err != nil {
+		return err
+	}
+	r.result.TailscaleSSH = "on"
+	return nil
 }
 
 func (r *Runner) reachAdmin(ctx context.Context, log func(string)) (err error) {
@@ -489,7 +519,77 @@ func (r *Runner) reachAdmin(ctx context.Context, log func(string)) (err error) {
 	r.admin = c
 	r.joinedByLink = false // reached from this computer: the tailnet is the operator's
 	log("private connection works; the rest of the setup uses it")
-	return r.enableTailscaleSSH(ctx, r.pub, log)
+	return nil
+}
+
+// finishTailscaleSSH turns Tailscale SSH on as the last step. It takes over
+// port 22 on the tailnet address, so every check above ran against sshd
+// first; switched on earlier it cut the private connection. A fresh login
+// through it must work, or it goes off again so sshd with the key stays
+// reachable over the tailnet.
+func (r *Runner) finishTailscaleSSH(ctx context.Context, log func(string)) error {
+	if err := remote.TailscaleSetSSH(ctx, r.pub, true, log); err != nil {
+		return err
+	}
+	r.tsSSHPaused = false
+	auth := r.auth()
+	auth.Password = ""
+	auth.Banner = func(msg string) {
+		// The tailnet policy's "check" action asks for a browser login here.
+		r.attention("Tailscale SSH: " + strings.TrimSpace(msg))
+	}
+	target := net.JoinHostPort(r.result.AdminAddress, fmt.Sprint(r.facts.SSHPort))
+	log("checking a new login to " + target + " through Tailscale SSH")
+	dctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	c, err := sshx.Dial(dctx, target, auth, sshx.HostKeyPolicy{Expect: r.hostKey, Warn: log})
+	cancel()
+	if err == nil {
+		c.Close()
+		r.result.TailscaleSSH = "on"
+		log("Tailscale SSH works; logins over the tailnet now follow your tailnet policy")
+		return nil
+	}
+	log("a login through Tailscale SSH did not work (" + shortErr(err) + "); switching it off again")
+	if oerr := remote.TailscaleSetSSH(ctx, r.pub, false, log); oerr != nil {
+		return fmt.Errorf("a login through Tailscale SSH failed (%v) and switching it off failed too: %w; run `tailscale set --ssh=false` on the server", err, oerr)
+	}
+	r.result.TailscaleSSH = "off: a login through it did not work (" + shortErr(err) + "); sshd with your key works. Try `tailscale set --ssh` on the server once your tailnet policy allows you in"
+	return nil
+}
+
+// resumeTailscaleSSH turns Tailscale SSH back on after a failed run that
+// paused it.
+func (r *Runner) resumeTailscaleSSH(log func(string)) {
+	if !r.tsSSHPaused || r.pub == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := remote.TailscaleSetSSH(ctx, r.pub, true, log); err != nil {
+		log("could not turn Tailscale SSH back on: " + shortErr(err) + "; run `tailscale set --ssh` on the server")
+		return
+	}
+	r.tsSSHPaused = false
+}
+
+func (r *Runner) skipUpdate() string {
+	if !r.o.Plan.UpdateSystem {
+		return "not requested"
+	}
+	return ""
+}
+
+// updateSystem installs pending package updates before anything is installed.
+func (r *Runner) updateSystem(ctx context.Context, log func(string)) error {
+	reboot, err := remote.UpdateSystem(ctx, r.server(), r.facts, log)
+	if err != nil {
+		return err
+	}
+	if reboot {
+		r.result.RebootNeeded = true
+		r.attention("the update needs a reboot to finish (new kernel or core libraries); reboot once the setup is done")
+	}
+	return nil
 }
 
 // dialAdminRetry keeps trying for up to wait; new tailnet nodes take a moment.
@@ -711,13 +811,13 @@ func (r *Runner) rolledBackError(at string, cause error) error {
 	if at != "" {
 		when = "at " + at + " UTC"
 	}
-	r.attention(7, "the new rules could not be confirmed in time; the server rolled back to its previous firewall "+when)
+	r.attention("the new rules could not be confirmed in time; the server rolled back to its previous firewall " + when)
 	return fmt.Errorf("the new firewall could not be confirmed and the server rolled back to its previous rules %s: %w", when, cause)
 }
 
 func (r *Runner) waitForRollback(ctx context.Context, log func(string), cause error) error {
 	secs := r.o.Plan.Firewall.RollbackSeconds
-	r.attention(7, "the new rules block the private connection; waiting for the server to roll back on its own")
+	r.attention("the new rules block the private connection; waiting for the server to roll back on its own")
 	log("reason: " + shortErr(cause))
 	wait := time.Duration(secs)*time.Second + 10*time.Second
 	select {
@@ -759,7 +859,7 @@ func (r *Runner) verify(ctx context.Context, log func(string)) error {
 		conn.Close()
 		r.result.PublicSSHClosed = false
 		r.result.PublicSSHNote = "a new connection to " + p.Address() + " still succeeds. If this address is not the server's internet interface (" + p.Firewall.WANInterface + "), that is expected; otherwise check the WAN interface name."
-		r.attention(8, r.result.PublicSSHNote)
+		r.attention(r.result.PublicSSHNote)
 		return nil
 	}
 	r.result.PublicSSHClosed = true

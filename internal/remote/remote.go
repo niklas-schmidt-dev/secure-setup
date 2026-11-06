@@ -169,6 +169,44 @@ func Detect(ctx context.Context, c Host) (*Facts, error) {
 }
 
 // InstallPackages installs packages with the detected package manager.
+// UpdateSystem installs pending package updates (apt-get upgrade, dnf
+// upgrade, ...). It reports whether a reboot is needed to finish them.
+func UpdateSystem(ctx context.Context, c Host, f *Facts, onLine func(string)) (reboot bool, err error) {
+	var script string
+	switch f.PkgMgr {
+	case "apt-get":
+		script = "export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a\napt-get update -q\n" +
+			"apt-get upgrade -y -q -o DPkg::Lock::Timeout=300 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
+	case "dnf":
+		script = "dnf upgrade -y -q"
+	case "yum":
+		script = "yum update -y -q"
+	case "pacman":
+		script = "pacman -Syu --noconfirm"
+	case "zypper":
+		script = "zypper --non-interactive update"
+	case "apk":
+		script = "apk upgrade"
+	default:
+		return false, fmt.Errorf("no supported package manager found (need apt-get, dnf, yum, pacman or zypper)")
+	}
+	script += "\nif [ -f /var/run/reboot-required ] || { command -v needs-restarting >/dev/null 2>&1 && ! needs-restarting -r >/dev/null 2>&1; }; then echo REBOOT_REQUIRED; fi\n"
+	err = c.Script(ctx, script, func(line string) {
+		if line == "REBOOT_REQUIRED" {
+			reboot = true
+		} else if onLine != nil {
+			onLine(line)
+		}
+	})
+	if err != nil {
+		return false, fmt.Errorf("update the system: %w", err)
+	}
+	if f.PkgMgr == "apt-get" {
+		f.aptUpdated = true
+	}
+	return reboot, nil
+}
+
 func InstallPackages(ctx context.Context, c Host, f *Facts, onLine func(string), pkgs ...string) error {
 	if len(pkgs) == 0 {
 		return nil

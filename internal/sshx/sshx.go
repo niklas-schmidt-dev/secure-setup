@@ -38,6 +38,10 @@ type Auth struct {
 	KeyPath    string // explicit private key; empty means ssh-agent plus the default keys in ~/.ssh
 	Passphrase string
 	Password   string
+	// Banner, when set, receives the server's login banner (Tailscale SSH
+	// sends its browser check there) and the login may take until the
+	// context's deadline instead of the usual dial timeout.
+	Banner func(message string)
 }
 
 // HostKeyPrompter is asked when a server is not in known_hosts yet.
@@ -91,12 +95,22 @@ func Dial(ctx context.Context, addr string, auth Auth, policy HostKeyPolicy) (*C
 		},
 		Timeout: dialTimeout,
 	}
+	loginDeadline := time.Now().Add(dialTimeout)
+	if auth.Banner != nil {
+		cfg.BannerCallback = func(message string) error {
+			auth.Banner(message)
+			return nil
+		}
+		if d, ok := ctx.Deadline(); ok && d.After(loginDeadline) {
+			loginDeadline = d
+		}
+	}
 	d := net.Dialer{Timeout: dialTimeout, KeepAlive: 15 * time.Second}
 	nc, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("connect to %s: %w", addr, err)
 	}
-	_ = nc.SetDeadline(time.Now().Add(dialTimeout))
+	_ = nc.SetDeadline(loginDeadline)
 	sc, chans, reqs, err := ssh.NewClientConn(nc, addr, cfg)
 	if err != nil {
 		nc.Close()

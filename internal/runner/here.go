@@ -36,6 +36,7 @@ func (r *Runner) localSteps() []step {
 	}
 	return []step{
 		{name: "Look around on this machine", run: r.hereDetect},
+		{name: "Update the system", skip: r.skipUpdate, run: r.updateSystem},
 		{name: "Install Tailscale", skip: func() string {
 			if ts.UseExisting {
 				return "using the existing private network " + ts.AdminAddress
@@ -116,7 +117,7 @@ func (r *Runner) hereDetect(ctx context.Context, log func(string)) error {
 		log("a secure-setup firewall is already loaded; it will be replaced")
 	}
 	if f.RolledBack != "" {
-		r.attention(0, "an earlier secure-setup run rolled its firewall back at "+f.RolledBack+" UTC; this run starts fresh")
+		r.attention("an earlier secure-setup run rolled its firewall back at " + f.RolledBack + " UTC; this run starts fresh")
 	}
 	if f.Tailscale {
 		log("tailscale installed, state: " + orUnknown(f.TailscaleState))
@@ -310,7 +311,7 @@ func (r *Runner) confirmByLogin(ctx context.Context, log func(string)) error {
 	if user == "" {
 		user = localhost.LoginUser()
 	}
-	r.attention(7, fmt.Sprintf("Now prove the new rules let you in. From ANOTHER device on your tailnet, open a new terminal and log in:\n\n    ssh%s %s@%s\n\nThat login confirms the firewall. You have %d seconds; otherwise this machine restores its previous firewall by itself.\nIf you use Tailscale SSH, run `secure-setup confirm` in the new session.", port, user, target, secs))
+	r.attention(fmt.Sprintf("Now prove the new rules let you in. From ANOTHER device on your tailnet, open a new terminal and log in:\n\n    ssh%s %s@%s\n\nThat login confirms the firewall. You have %d seconds; otherwise this machine restores its previous firewall by itself.\nIf you use Tailscale SSH, run `secure-setup confirm` in the new session.", port, user, target, secs))
 	adminAddr, err := netip.ParseAddr(addr)
 	if err != nil {
 		return err
@@ -494,7 +495,7 @@ func (r *Runner) keepFirewall(ctx context.Context, log func(string)) error {
 }
 
 func (r *Runner) waitForLocalRollback(ctx context.Context, log func(string), cause error) error {
-	r.attention(7, "no login arrived; waiting for this machine to restore its previous firewall")
+	r.attention("no login arrived; waiting for this machine to restore its previous firewall")
 	log("reason: " + shortErr(cause))
 	deadline := time.Now().Add(25 * time.Second)
 	for {
