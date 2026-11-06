@@ -334,7 +334,7 @@ func TestTailscaleUpLeavesSSHOff(t *testing.T) {
 		t.Fatalf("join script: %s", h.all())
 	}
 	h = &recordHost{}
-	if err := TailscaleSetSSH(context.Background(), h, nil); err != nil || !strings.Contains(h.all(), "tailscale set --ssh") {
+	if err := TailscaleSetSSH(context.Background(), h, true, nil); err != nil || !strings.Contains(h.all(), "tailscale set --ssh=true") {
 		t.Fatalf("set ssh: %v %s", err, h.all())
 	}
 }
@@ -354,5 +354,34 @@ func TestTailnetName(t *testing.T) {
 		if got := st.Tailnet(); got != c.want {
 			t.Fatalf("%s: %q, want %q", c.json, got, c.want)
 		}
+	}
+}
+
+func TestTailscaleSSHOn(t *testing.T) {
+	for out, want := range map[string]bool{`{"RunSSH": true, "WantRunning": true}`: true, `{"RunSSH": false}`: false, "": false} {
+		if got := TailscaleSSHOn(context.Background(), &recordHost{output: func(string) string { return out }}); got != want {
+			t.Fatalf("%q: %v, want %v", out, got, want)
+		}
+	}
+}
+
+// The update uses each package manager non-interactively and reports a
+// pending reboot instead of printing the marker.
+func TestUpdateSystem(t *testing.T) {
+	for mgr, want := range map[string]string{
+		"apt-get": "apt-get upgrade -y -q -o DPkg::Lock::Timeout=300",
+		"dnf":     "dnf upgrade -y",
+		"pacman":  "pacman -Syu --noconfirm",
+		"zypper":  "zypper --non-interactive update",
+	} {
+		var lines []string
+		h := &recordHost{stdout: func(string) string { return "Setting up openssl\nREBOOT_REQUIRED" }}
+		reboot, err := UpdateSystem(context.Background(), h, &Facts{PkgMgr: mgr}, func(l string) { lines = append(lines, l) })
+		if err != nil || !reboot || !strings.Contains(h.all(), want) || slices.Contains(lines, "REBOOT_REQUIRED") {
+			t.Fatalf("%s: reboot %v err %v lines %q script %s", mgr, reboot, err, lines, h.all())
+		}
+	}
+	if _, err := UpdateSystem(context.Background(), &recordHost{}, &Facts{}, nil); err == nil {
+		t.Fatal("no package manager accepted")
 	}
 }

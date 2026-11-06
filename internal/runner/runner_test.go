@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/niklas-schmidt-dev/secure-setup/internal/localhost"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/plan"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/remote"
 )
@@ -146,5 +147,25 @@ func TestLeaveUnverifiedTailnet(t *testing.T) {
 	scripts = nil
 	if err := r.leaveUnverifiedTailnet(scriptHost{scripts: &scripts}, errors.New("x"), func(string) {}); len(scripts) != 0 || err.Error() != "x" {
 		t.Fatal("a verified tailnet was logged out")
+	}
+}
+
+// The system update comes before anything is installed, and Tailscale SSH is
+// the last remote step: it takes over port 22 on the tailnet address, which
+// every earlier step uses to reach sshd.
+func TestStepOrder(t *testing.T) {
+	p := plan.Default()
+	remoteSteps := New(Options{Plan: &p}).Steps()
+	if remoteSteps[1] != "Update the system" || remoteSteps[len(remoteSteps)-1] != "Turn on Tailscale SSH" {
+		t.Fatalf("remote steps: %q", remoteSteps)
+	}
+	lp := plan.Default()
+	lp.Local = true
+	localSteps := New(Options{Plan: &lp, Local: &localhost.Host{}}).Steps()
+	if localSteps[1] != "Update the system" {
+		t.Fatalf("local steps: %q", localSteps)
+	}
+	if !plan.Default().UpdateSystem {
+		t.Fatal("the system update is not on by default")
 	}
 }

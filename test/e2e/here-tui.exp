@@ -13,8 +13,9 @@ expect {
   timeout { puts "\nWALK: FAIL no firewall screen"; exit 1 }
 }
 # Web traffic select -> enter (https), extra ports (prefilled 8080) -> enter,
-# ping -> enter, password login -> enter, rollback -> enter, confirmation -> enter
-foreach i {1 2 3 4 5 6} { sleep 0.4; send "\r" }
+# ping -> enter, password login -> enter, rollback -> enter, confirmation ->
+# enter, then the system update page (No from the plan) -> enter
+foreach i {1 2 3 4 5 6 7} { sleep 0.4; send "\r" }
 expect {
   -re {Review} { puts "\nWALK: review screen" }
   timeout { puts "\nWALK: FAIL no review screen"; exit 1 }

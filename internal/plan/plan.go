@@ -19,11 +19,13 @@ import (
 type Plan struct {
 	// Local means the plan is applied on the machine secure-setup runs on
 	// (`secure-setup here`); Server is then unused.
-	Local     bool      `json:"local,omitempty"`
-	Server    Server    `json:"server"`
-	Tailscale Tailscale `json:"tailscale"`
-	Firewall  Firewall  `json:"firewall"`
-	SSH       SSH       `json:"ssh"`
+	Local bool `json:"local,omitempty"`
+	// UpdateSystem installs pending package updates before anything else.
+	UpdateSystem bool      `json:"update_system"`
+	Server       Server    `json:"server"`
+	Tailscale    Tailscale `json:"tailscale"`
+	Firewall     Firewall  `json:"firewall"`
+	SSH          SSH       `json:"ssh"`
 }
 
 // Confirmation modes for a local run.
@@ -87,8 +89,9 @@ type SSH struct {
 // from Cloudflare, ping allowed, key-only sshd.
 func Default() Plan {
 	return Plan{
-		Server:    Server{Port: 22, User: "root"},
-		Tailscale: Tailscale{AdminInterface: "tailscale0", UDPPort: 41641},
+		UpdateSystem: true,
+		Server:       Server{Port: 22, User: "root"},
+		Tailscale:    Tailscale{AdminInterface: "tailscale0", UDPPort: 41641},
 		Firewall: Firewall{
 			WebPorts:        []int{443},
 			AllowPing:       true,

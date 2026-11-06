@@ -57,6 +57,7 @@ plan() {
 	d exec -i "$srv" sh -c "cat > $1" <<JSON
 {
   "local": true,
+  "update_system": false,
   "tailscale": {"admin_interface": "eth1", "udp_port": 41641, "use_existing_network": true, "admin_address": "$prvip"},
   "firewall": {"web_ports": [443], "allow_ping": true, "tailnet_ports": [22, 8080], "rollback_seconds": 30, "cloudflare_sync": true, "confirm_by": "$2"},
   "ssh": {"harden": true, "add_local_key": true}

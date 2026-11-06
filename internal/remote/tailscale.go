@@ -63,13 +63,28 @@ func (s *TSStatus) Tailnet() string {
 	return "unknown"
 }
 
-// TailscaleSetSSH turns Tailscale SSH on. secure-setup does this only once
-// the node is known to be in the operator's tailnet, never in `tailscale up`.
-func TailscaleSetSSH(ctx context.Context, c Host, onLine func(string)) error {
-	if err := c.Script(ctx, "tailscale set --ssh\necho \"Tailscale SSH enabled\"", onLine); err != nil {
-		return fmt.Errorf("enable Tailscale SSH: %w", err)
+// TailscaleSetSSH turns Tailscale SSH on or off. secure-setup turns it on
+// only once the node is known to be in the operator's tailnet, never in
+// `tailscale up`. While it is on, tailscaled answers port 22 on the tailnet
+// address instead of sshd.
+func TailscaleSetSSH(ctx context.Context, c Host, on bool, onLine func(string)) error {
+	state := map[bool]string{true: "enabled", false: "disabled"}[on]
+	if err := c.Script(ctx, fmt.Sprintf("tailscale set --ssh=%t\necho \"Tailscale SSH %s\"", on, state), onLine); err != nil {
+		return fmt.Errorf("set Tailscale SSH %s: %w", state, err)
 	}
 	return nil
+}
+
+// TailscaleSSHOn reports whether Tailscale SSH is on (false when unknown).
+func TailscaleSSHOn(ctx context.Context, c Host) bool {
+	out, err := c.Output(ctx, "tailscale debug prefs")
+	if err != nil {
+		return false
+	}
+	var prefs struct {
+		RunSSH bool `json:"RunSSH"`
+	}
+	return json.Unmarshal([]byte(out), &prefs) == nil && prefs.RunSSH
 }
 
 // TailscaleLogout takes the node off the tailnet it joined.

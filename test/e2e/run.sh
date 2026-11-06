@@ -47,6 +47,7 @@ d exec "$cli" nc -z -w 5 "$prvip" 22 || fail "private ssh not reachable before t
 echo "== run 1: apply (existing private network stands in for the tailnet)"
 d exec -i "$cli" sh -c 'cat > /root/plan.json' <<JSON
 {
+  "update_system": true,
   "server": {"host": "$pubip", "port": 22, "user": "root", "key_path": "/root/.ssh/id_ed25519"},
   "tailscale": {"admin_interface": "eth1", "udp_port": 41641, "use_existing_network": true, "admin_address": "$prvip"},
   "firewall": {"web_ports": [443], "allow_ping": true, "tailnet_ports": [22, 8080], "rollback_seconds": 30, "cloudflare_sync": true},
@@ -55,6 +56,7 @@ d exec -i "$cli" sh -c 'cat > /root/plan.json' <<JSON
 JSON
 d exec "$cli" secure-setup apply -f /root/plan.json --yes 2>&1 | tee /tmp/e2e-run1.log
 grep -q "The server is locked down" /tmp/e2e-run1.log || fail "run 1 did not report success"
+grep -q "==> Update the system" /tmp/e2e-run1.log && ! grep -q "Update the system: skipped" /tmp/e2e-run1.log || fail "run 1 did not update the system first"
 
 echo "== assertions after run 1"
 if d exec "$cli" nc -z -w 5 "$pubip" 22; then fail "public ssh still open"; else echo "   public ssh blocked"; fi
@@ -74,6 +76,7 @@ echo "== run 2: rules that would lock us out must roll back"
 d exec -i "$cli" sh -c 'cat > /root/plan-bad.json' <<JSON
 {
   "server": {"host": "$prvip", "port": 22, "user": "root", "key_path": "/root/.ssh/id_ed25519"},
+  "update_system": false,
   "tailscale": {"admin_interface": "eth0", "udp_port": 41641, "use_existing_network": true, "admin_address": "$prvip"},
   "firewall": {"web_ports": [443], "allow_ping": true, "tailnet_ports": [22], "rollback_seconds": 30, "cloudflare_sync": true, "wan_interface": "eth1", "wan_interface_override": true},
   "ssh": {"harden": false, "add_local_key": false}
