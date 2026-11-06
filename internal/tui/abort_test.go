@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -55,6 +56,23 @@ func TestCtrlCWaitsForTheRunToCleanUp(t *testing.T) {
 	}
 	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}); !isQuit(cmd) {
 		t.Fatal("q did not leave the done screen")
+	}
+}
+
+// A cancelled step may fail with an error that is not context.Canceled (a
+// killed command); the wizard still exits as aborted.
+func TestAbortedRunExitsAsAborted(t *testing.T) {
+	m, _ := runningModel(t)
+	m.Update(ctrlC)
+	m.Update(runDoneMsg{err: errors.New("Update the system: signal: killed")})
+	if err := m.exitErr(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("exit error %v, want context.Canceled", err)
+	}
+	m, _ = runningModel(t)
+	failed := errors.New("Connect: no route to host")
+	m.Update(runDoneMsg{err: failed})
+	if err := m.exitErr(); err != failed {
+		t.Fatalf("a failed run without an abort returned %v", err)
 	}
 }
 

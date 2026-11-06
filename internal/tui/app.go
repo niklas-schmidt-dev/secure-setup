@@ -76,17 +76,20 @@ func run(ctx context.Context, p *plan.Plan, version string, local *localhost.Hos
 	if err != nil {
 		return err
 	}
-	fm, ok := final.(*model)
-	if !ok {
-		return nil
-	}
-	if fm.runErr != nil {
-		return fm.runErr
-	}
-	if fm.aborted && fm.result == nil {
-		return context.Canceled
+	if fm, ok := final.(*model); ok {
+		return fm.exitErr()
 	}
 	return nil
+}
+
+// exitErr is what the wizard returns. An aborted run counts as aborted (exit
+// 130) whatever error its cancelled step returned, e.g. "signal: killed"; the
+// done screen showed that error already.
+func (m *model) exitErr() error {
+	if m.aborted && m.result == nil {
+		return context.Canceled
+	}
+	return m.runErr
 }
 
 type model struct {
