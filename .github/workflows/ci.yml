@@ -12,8 +12,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
       - name: gofmt
@@ -27,3 +29,5 @@ jobs:
           done
       - name: installer syntax
         run: sh -n install.sh
+      - name: known vulnerabilities in called code
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...

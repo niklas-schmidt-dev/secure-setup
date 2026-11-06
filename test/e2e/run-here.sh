@@ -29,7 +29,8 @@ wait_log() {
 }
 
 echo "== build linux binary"
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/secure-setup-linux-amd64 .
+bin=${E2E_BINARY:-/tmp/secure-setup-linux-amd64}
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$bin" .
 
 echo "== start server and client"
 d network create --subnet "${E2E_SUBNET_PUBLIC:-10.250.100.0/24}" "$pub" >/dev/null
@@ -38,11 +39,12 @@ d run -d --name "$srv" --privileged --hostname here-vps --network "$pub" secure-
 d network connect "$prv" "$srv"
 d run -d --name "$cli" --network "$pub" secure-setup-e2e-client >/dev/null
 d network connect "$prv" "$cli"
-d cp /tmp/secure-setup-linux-amd64 "$srv:/usr/local/bin/secure-setup"
+d cp "$bin" "$srv:/usr/local/bin/secure-setup"
 d exec "$cli" sh -c 'mkdir -p /root/.ssh && chmod 700 /root/.ssh && ssh-keygen -q -t ed25519 -N "" -f /root/.ssh/id_ed25519'
 pubkey=$(d exec "$cli" cat /root/.ssh/id_ed25519.pub)
 pubip=$(d inspect -f "{{(index .NetworkSettings.Networks \"$pub\").IPAddress}}" "$srv")
 prvip=$(d inspect -f "{{(index .NetworkSettings.Networks \"$prv\").IPAddress}}" "$srv")
+cliprv=$(d inspect -f "{{(index .NetworkSettings.Networks \"$prv\").IPAddress}}" "$cli")
 echo "   server public $pubip (eth0), private $prvip (eth1)"
 for i in $(seq 1 30); do
 	if d exec "$srv" systemctl is-active --quiet ssh 2>/dev/null; then break; fi
@@ -66,7 +68,7 @@ echo "== run 0: hardening must be skipped without an authorized key (nothing to 
 plan /root/plan-login.json login
 d exec -d "$srv" sh -c 'secure-setup here -f /root/plan-login.json --yes > /root/run0.log 2>&1; echo "EXIT=$?" >> /root/run0.log'
 wait_log /root/run0.log "Now prove the new rules" 60
-d exec "$srv" grep -q "Harden SSH (keys only): skipped (no public key" /root/run0.log || { d exec "$srv" cat /root/run0.log; fail "hardening not skipped"; }
+d exec "$srv" grep -q "Harden SSH (keys only): skipped (no usable public key" /root/run0.log || { d exec "$srv" cat /root/run0.log; fail "hardening not skipped"; }
 echo "   hardening skipped as expected; letting it roll back (no login)"
 wait_log /root/run0.log "EXIT=" 70
 d exec "$srv" grep -q "rolled back to its previous rules" /root/run0.log || { d exec "$srv" cat /root/run0.log; fail "run 0 did not report the rollback"; }
@@ -87,7 +89,7 @@ if d exec "$cli" nc -z -w 3 "$pubip" 22; then fail "public ssh still open while 
 echo "   rules live, public ssh blocked; logging in over the private network"
 login "$prvip" "echo hello-from-client" | grep -q hello-from-client || fail "private login failed"
 wait_log /root/run1.log "EXIT=" 60
-d exec "$srv" grep -Eq "new SSH session from .* over eth1: the rules let you in|sshd accepted a login by root from 10.250.101.3 after the rules went live" /root/run1.log || { d exec "$srv" tail -30 /root/run1.log; fail "login not detected"; }
+d exec "$srv" grep -Eq "new SSH session from .* through the eth1 rule: the rules let you in|sshd accepted a login by root from $cliprv after the rules went live" /root/run1.log || { d exec "$srv" tail -30 /root/run1.log; fail "login not detected"; }
 d exec "$srv" grep -q "a connection arrived over eth1 through the new rule" /root/run1.log || fail "rule counter did not register the login"
 d exec "$srv" grep -q "This machine is locked down" /root/run1.log || { d exec "$srv" tail -30 /root/run1.log; fail "run 1 did not report success"; }
 d exec "$srv" grep -q "EXIT=0" /root/run1.log || fail "run 1 should exit 0"
@@ -144,7 +146,7 @@ echo "   ok"
 
 echo "== run 5: the wizard (TUI) on the server, driven by expect, confirmed by a login"
 d cp test/e2e/here-tui.exp "$srv:/root/here-tui.exp"
-d exec -d "$srv" sh -c 'HOME=/root TERM=xterm expect -f /root/here-tui.exp > /root/run5.log 2>&1; echo "EXIT=$?" >> /root/run5.log'
+d exec -d -e E2E_PRIVATE_IP="$prvip" "$srv" sh -c 'HOME=/root TERM=xterm expect -f /root/here-tui.exp > /root/run5.log 2>&1; echo "EXIT=$?" >> /root/run5.log'
 wait_log /root/run5.log "WALK: waiting for login" 120
 sleep 2
 login "$prvip" true || fail "private login during TUI run failed"

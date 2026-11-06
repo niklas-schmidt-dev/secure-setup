@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -23,6 +24,13 @@ import (
 )
 
 const dialTimeout = 20 * time.Second
+
+// plainHostKeyAlgos is x/crypto's default host key preference without
+// certificate, DSA and SHA-1 RSA algorithms.
+var plainHostKeyAlgos = []string{
+	ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521,
+	ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSASHA512, ssh.KeyAlgoED25519,
+}
 
 // Auth describes how to log in.
 type Auth struct {
@@ -70,6 +78,10 @@ func Dial(ctx context.Context, addr string, auth Auth, policy HostKeyPolicy) (*C
 	cfg := &ssh.ClientConfig{
 		User: auth.User,
 		Auth: methods,
+		// Plain host keys only, in x/crypto's default order, so a server cannot
+		// steer verification into the certificate path, and keys remembered
+		// by earlier runs keep matching.
+		HostKeyAlgorithms: plainHostKeyAlgos,
 		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 			if err := policy.check(ctx, hostname, remote, key); err != nil {
 				return err
@@ -141,8 +153,7 @@ func (c *Client) Script(ctx context.Context, script string, onLine func(string))
 
 // WriteFile writes data to path atomically, creating parent directories.
 func (c *Client) WriteFile(ctx context.Context, path string, data []byte, mode string) error {
-	q := Quote(path)
-	script := fmt.Sprintf(`umask 022; d=$(dirname -- %s); mkdir -p -- "$d"; cat > %s.tmp && mv -f %s.tmp %s && chmod %s %s`, q, q, q, q, mode, q)
+	script := WriteFileScript(path, mode)
 	_, stderr, err := c.run(ctx, c.wrap("/bin/sh -c "+Quote(script)), bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("write %s: %w%s", path, err, tailOf(stderr))
@@ -247,6 +258,16 @@ func scanLines(data []byte, atEOF bool) (int, []byte, error) {
 	return 0, nil, nil
 }
 
+// WriteFileScript is the shell both Host implementations run to write a file
+// from stdin. The temp file is created under umask 077 by mktemp in the
+// target directory and gets its final mode before the rename, so another
+// user can never open the contents of a 0600 file. New parent directories
+// are created 0700.
+func WriteFileScript(path, mode string) string {
+	q := Quote(path)
+	return fmt.Sprintf(`umask 077; d=$(dirname -- %s); mkdir -p -- "$d" || exit 1; t=$(mktemp %s.XXXXXX) || exit 1; trap 'rm -f "$t"' EXIT; cat > "$t" && chmod %s "$t" && mv -f "$t" %s`, q, q, mode, q)
+}
+
 // Quote wraps s in single quotes for POSIX sh.
 func Quote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
@@ -297,7 +318,13 @@ func (p HostKeyPolicy) path() string {
 }
 
 func (p HostKeyPolicy) check(ctx context.Context, hostname string, remote net.Addr, key ssh.PublicKey) error {
-	known, mismatch := p.lookup(hostname, remote, key)
+	if _, ok := key.(*ssh.Certificate); ok {
+		return fmt.Errorf("%w: %s presented a host certificate, which secure-setup does not verify", ErrHostKeyRejected, hostname)
+	}
+	known, mismatch, err := p.lookup(hostname, remote, key)
+	if err != nil {
+		return err
+	}
 	if p.Expect != nil {
 		if !bytes.Equal(p.Expect.Marshal(), key.Marshal()) {
 			return fmt.Errorf("%w for %s: expected %s, got %s", ErrHostKeyMismatch, hostname,
@@ -336,24 +363,29 @@ func (p HostKeyPolicy) check(ctx context.Context, hostname string, remote net.Ad
 	return p.remember(hostname, key)
 }
 
-// lookup reports whether known_hosts knows this exact key, or holds a different one.
-func (p HostKeyPolicy) lookup(hostname string, remote net.Addr, key ssh.PublicKey) (known, mismatch bool) {
-	if _, err := os.Stat(p.path()); err != nil {
-		return false, false
-	}
+// lookup reports whether known_hosts knows this exact key, or holds a
+// different one for the host. Only a missing file or a host without any entry
+// counts as unknown; an unreadable or unparsable file and a revoked key are
+// errors, never a first contact.
+func (p HostKeyPolicy) lookup(hostname string, remote net.Addr, key ssh.PublicKey) (known, mismatch bool, err error) {
 	cb, err := knownhosts.New(p.path())
-	if err != nil {
-		return false, false
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, false, nil
 	}
-	err = cb(hostname, remote, key)
-	if err == nil {
-		return true, false
+	if err != nil {
+		return false, false, fmt.Errorf("%w: cannot use %s (%v); fix or move that file before connecting", ErrHostKeyRejected, p.path(), err)
 	}
 	var ke *knownhosts.KeyError
-	if errors.As(err, &ke) && len(ke.Want) > 0 {
-		return false, true
+	switch err := cb(hostname, remote, key); {
+	case err == nil:
+		return true, false, nil
+	case errors.As(err, &ke) && len(ke.Want) > 0:
+		return false, true, nil
+	case errors.As(err, &ke):
+		return false, false, nil
+	default: // *knownhosts.RevokedError and anything else
+		return false, false, fmt.Errorf("%w for %s: %v", ErrHostKeyRejected, knownhosts.Normalize(hostname), err)
 	}
-	return false, false
 }
 
 func (p HostKeyPolicy) remember(hostname string, key ssh.PublicKey) error {

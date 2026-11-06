@@ -15,6 +15,8 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+
+	"github.com/niklas-schmidt-dev/secure-setup/internal/sshx"
 )
 
 // Host executes on the local machine. It satisfies remote.Host.
@@ -98,11 +100,10 @@ func (h *Host) Script(ctx context.Context, script string, onLine func(string)) e
 	return nil
 }
 
-// WriteFile writes data to path atomically, creating parent directories.
+// WriteFile writes data to path atomically, creating parent directories
+// (see sshx.WriteFileScript for the guarantees).
 func (h *Host) WriteFile(ctx context.Context, path string, data []byte, mode string) error {
-	q := quote(path)
-	script := fmt.Sprintf(`umask 022; d=$(dirname -- %s); mkdir -p -- "$d"; cat > %s.tmp && mv -f %s.tmp %s && chmod %s %s`, q, q, q, q, mode, q)
-	c := h.cmd(ctx, script)
+	c := h.cmd(ctx, sshx.WriteFileScript(path, mode))
 	c.Stdin = bytes.NewReader(data)
 	var errb bytes.Buffer
 	c.Stderr = &errb
@@ -110,10 +111,6 @@ func (h *Host) WriteFile(ctx context.Context, path string, data []byte, mode str
 		return fmt.Errorf("write %s: %w%s", path, err, tailOf(errb.String()))
 	}
 	return nil
-}
-
-func quote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // scanLines splits on \n and \r so progress output arrives line by line.

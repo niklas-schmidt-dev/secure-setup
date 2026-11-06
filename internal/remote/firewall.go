@@ -19,6 +19,17 @@ const (
 	RolledBackMarker = StateDir + "/rolled-back"
 	RollbackUnit     = "secure-setup-rollback"
 
+	// Host firewalls that were running when the run started. They are stopped
+	// only while the rollback timer is armed, restarted by a rollback or a
+	// failed apply, and retired for good only in ConfirmFirewall.
+	UFWWasActive       = StateDir + "/ufw-was-active"
+	FirewalldWasActive = StateDir + "/firewalld-was-active"
+	// firewalld enabled at boot but not running: it would replace the
+	// confirmed rules at the next boot, so ConfirmFirewall masks it.
+	FirewalldWasEnabled = StateDir + "/firewalld-was-enabled"
+	UFWRetired          = StateDir + "/ufw-retired"
+	FirewalldRetired    = StateDir + "/firewalld-retired"
+
 	SyncScriptPath = "/usr/local/sbin/secure-setup-cloudflare-sync"
 	SyncUnit       = "secure-setup-cloudflare-sync"
 	unitDir        = "/etc/systemd/system/"
@@ -31,9 +42,9 @@ type FirewallFiles struct {
 	CloudflareSync bool   // install the daily refresh timer
 }
 
-// PrepareFirewall installs nftables, retires ufw/firewalld, stages the new
-// ruleset, validates it and records the current state for rollback. Nothing
-// is applied yet.
+// PrepareFirewall installs nftables, stages the new ruleset, validates it and
+// records the current state (secure_setup table, running ufw/firewalld) for
+// rollback. Nothing is applied or stopped yet.
 func PrepareFirewall(ctx context.Context, c Host, f *Facts, files FirewallFiles, onLine func(string)) error {
 	var pkgs []string
 	if !f.NFT {
@@ -47,19 +58,22 @@ func PrepareFirewall(ctx context.Context, c Host, f *Facts, files FirewallFiles,
 	}
 	f.NFT = true
 
+	// Record which host firewall is running; it keeps running until the
+	// rollback timer is armed (ApplyFirewall).
+	record := fmt.Sprintf("mkdir -p %s\nrm -f %s %s %s\n", StateDir, UFWWasActive, FirewalldWasActive, FirewalldWasEnabled)
 	if f.UFWActive {
-		onLine("disabling ufw (nftables takes over)")
-		if err := c.Script(ctx, "ufw --force disable\nsystemctl disable --now ufw >/dev/null 2>&1 || true", onLine); err != nil {
-			return fmt.Errorf("disable ufw: %w", err)
-		}
-		f.UFWActive = false
+		record += "touch " + UFWWasActive + "\n"
+		onLine("ufw is active: it stops when the new rules go live and comes back if they roll back")
 	}
 	if f.FirewalldActive {
-		onLine("disabling firewalld (nftables takes over)")
-		if err := c.Script(ctx, "systemctl disable --now firewalld", onLine); err != nil {
-			return fmt.Errorf("disable firewalld: %w", err)
-		}
-		f.FirewalldActive = false
+		record += "touch " + FirewalldWasActive + "\n"
+		onLine("firewalld is active: it stops when the new rules go live and comes back if they roll back")
+	} else if f.FirewalldEnabled {
+		record += "touch " + FirewalldWasEnabled + "\n"
+		onLine("firewalld is enabled at boot but not running: it is masked once the new rules are confirmed")
+	}
+	if err := c.Script(ctx, record, onLine); err != nil {
+		return fmt.Errorf("record host firewall state: %w", err)
 	}
 
 	writes := []struct {
@@ -115,13 +129,17 @@ systemctl reset-failed %[1]s.timer >/dev/null 2>&1 || true
 rm -f %[2]s
 systemd-run --quiet --unit=%[1]s --on-active=%[3]d --timer-property=AccuracySec=1s --description="secure-setup firewall rollback" /bin/sh %[4]s
 echo "rollback timer armed: fires in %[3]ds unless confirmed"
+if [ -e %[6]s ]; then ufw --force disable >/dev/null; echo "ufw stopped (comes back if the rules roll back)"; fi
+if [ -e %[7]s ]; then systemctl stop firewalld; echo "firewalld stopped (comes back if the rules roll back)"; fi
 if ! nft -f %[5]s; then
 	systemctl stop %[1]s.timer >/dev/null 2>&1 || true
-	echo "applying the ruleset failed; nothing changed" >&2
+	if [ -e %[6]s ]; then ufw --force enable >/dev/null || true; fi
+	if [ -e %[7]s ]; then systemctl start firewalld || true; fi
+	echo "applying the ruleset failed; the previous firewall is back" >&2
 	exit 1
 fi
 echo "new firewall rules are live"
-`, RollbackUnit, RolledBackMarker, rollbackSeconds, RollbackScript, PendingPath)
+`, RollbackUnit, RolledBackMarker, rollbackSeconds, RollbackScript, PendingPath, UFWWasActive, FirewalldWasActive)
 	if err := c.Script(ctx, script, onLine); err != nil {
 		return fmt.Errorf("apply firewall: %w", err)
 	}
@@ -138,6 +156,19 @@ func ConfirmFirewall(ctx context.Context, c Host, f *Facts, cloudflareSync bool,
 grep -q '^include "/etc/nftables.conf"' /etc/sysconfig/nftables.conf || echo 'include "/etc/nftables.conf"' >> /etc/sysconfig/nftables.conf
 `
 	}
+	retireScript := fmt.Sprintf(`if [ -e %[1]s ]; then
+	systemctl disable ufw >/dev/null 2>&1 || true
+	mv -f %[1]s %[2]s
+	echo "ufw retired (nftables takes over)"
+fi
+if [ -e %[3]s ] || [ -e %[4]s ]; then
+	systemctl disable firewalld >/dev/null 2>&1 || true
+	systemctl mask firewalld >/dev/null 2>&1 || true
+	rm -f %[3]s %[4]s
+	touch %[5]s
+	echo "firewalld disabled and masked so it cannot replace the rules at boot (nftables takes over)"
+fi
+`, UFWWasActive, UFWRetired, FirewalldWasActive, FirewalldWasEnabled, FirewalldRetired)
 	sync := ""
 	if cloudflareSync {
 		sync = fmt.Sprintf(`systemctl enable --now %s.timer >/dev/null 2>&1
@@ -151,6 +182,7 @@ systemctl stop %[2]s.timer
 systemctl stop %[2]s.service >/dev/null 2>&1 || true
 echo "rollback timer cancelled"
 nft list table inet %[3]s >/dev/null
+%[9]s
 if [ -f %[4]s ] && ! grep -q '%[5]s' %[4]s; then
 	cp -a %[4]s %[4]s.secure-setup.bak
 	echo "kept the previous %[4]s as %[4]s.secure-setup.bak"
@@ -158,7 +190,7 @@ fi
 install -m 0644 %[6]s %[4]s
 %[7]ssystemctl enable --now nftables >/dev/null 2>&1
 echo "ruleset persisted in %[4]s; nftables.service enabled at boot"
-%[8]s`, RolledBackMarker, RollbackUnit, nftgen.TableName, nftgen.ConfigPath, nftgen.Marker, PendingPath, rhelInclude, sync)
+%[8]s`, RolledBackMarker, RollbackUnit, nftgen.TableName, nftgen.ConfigPath, nftgen.Marker, PendingPath, rhelInclude, sync, retireScript)
 	if err := c.Script(ctx, script, onLine); err != nil {
 		if exitStatus(err) == 2 {
 			return ErrRolledBack

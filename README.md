@@ -55,13 +55,13 @@ curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/mai
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh)"
 ```
 
-**Unattended at first boot**, so the server is never reachable from the
-internet at all: see [examples/cloud-init.yaml](examples/cloud-init.yaml).
-With a Tailscale auth key it is one line of user data:
-
-```
-TS_AUTHKEY=tskey-auth-... sh -c "$(curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh)" -- here --yes
-```
+**Unattended at first boot**: see [examples/cloud-init.yaml](examples/cloud-init.yaml).
+It runs as soon as cloud-init reaches its final stage and needs a Tailscale
+auth key. Until the new rules are live (a few minutes) the server is as
+reachable as the provider image makes it, and if the run fails it stays
+that way, so check `/var/log/secure-setup-firstboot.log` or test the public
+port from outside before you rely on it. Pair it with a provider firewall
+if the server must never be reachable at all.
 
 Other ways:
 
@@ -97,7 +97,11 @@ secure-setup render -f plan.json   print the nftables ruleset a plan produces
 
 The wizard saves its answers (without secrets) to
 `~/.config/secure-setup/<host>.json`, or `/etc/secure-setup/plan.json` on the
-server. Replaying that file sets up the next server the same way:
+server. Replaying that file sets up the next server the same way. The
+internet interface is detected on each server and not saved; a
+`wan_interface` you put in a plan must exist on the target, and if it differs
+from the interface of the default route the run stops unless the plan also
+sets `"wan_interface_override": true`:
 
 ```
 TS_AUTHKEY=tskey-auth-... secure-setup apply -f ~/.config/secure-setup/vps.json --yes
@@ -117,19 +121,23 @@ differ in who proves that the new rules let you in:
   password login is turned off. The strongest proof, and nothing to type on
   the server.
 - **On the server** (`here`), it asks you to log in once more from another
-  device over the tailnet while the timer runs. That login is detected (a new
-  session on the tailnet address, the rule's packet counter plus sshd's
-  journal) and confirms the rules; with Tailscale SSH, run
+  device over the tailnet while the timer runs. Only a connection that came
+  in through the new admin rule counts (its packet counter must move), from
+  a machine other than this one, either as a visible session or as an
+  "Accepted" line sshd itself wrote to the journal; with Tailscale SSH, run
   `secure-setup confirm` in the new session. Password login is only turned
-  off when a public key is already authorized or Tailscale SSH is on. It
-  cannot test its own public port from inside, so do that once from outside:
-  `nc -zv <public ip> 22` must fail.
+  off when `authorized_keys` holds a key sshd would accept for your account
+  (read as that account, no restricting options), or when this run turns
+  Tailscale SSH on; if the run then fails or rolls back, password login is
+  turned back on. It cannot test its own public port from inside, so do that
+  once from outside: `nc -zv <public ip> 22` must fail.
 - **Unattended** (`here --yes`, cloud-init), nobody can log in during the
-  run, so it confirms itself: the admin rule is loaded, sshd listens on the
-  tailnet address, Tailscale is running and online, and an online tailnet peer
-  answers a `tailscale ping` through the new rules. What it cannot see is your
-  tailnet ACL. If that blocks SSH to the new node, fix the ACL; the server is
-  intact and the provider console remains the back door.
+  run, so it confirms itself: the admin rule is loaded, a root-owned sshd
+  socket listens on the tailnet address, Tailscale is running and online, and
+  an online tailnet peer, if there is one, answers a `tailscale ping`. The
+  ping is an outbound probe; it does not exercise the admin rule. What it
+  cannot see is your tailnet ACL. If that blocks SSH to the new node, fix the
+  ACL; the server is intact and the provider console remains the back door.
 
 ## What ends up on the server
 
@@ -142,7 +150,13 @@ differ in who proves that the new rules let you in:
 | `/var/lib/secure-setup/` | rollback script and the previous ruleset; `rolled-back` appears if a rollback ever fired |
 | `/etc/secure-setup/plan.json` | the answers of a `here` run, for `secure-setup here -f` next time |
 
-ufw or firewalld, when active, are disabled: nftables takes over.
+ufw or firewalld, when active, keep running until the new rules go live under
+the rollback timer; a rollback starts them again. Only after confirmation is
+ufw disabled and firewalld disabled and masked (also when it was enabled at
+boot but not running, so it cannot replace the rules at the next boot).
+sshd hardening never loosens a stricter `PermitRootLogin` (`no`,
+`forced-commands-only`), and is reverted when sshd's effective policy, Match
+blocks included, still allows passwords.
 
 The ruleset in words:
 
@@ -192,7 +206,9 @@ non-zero. The server is in its previous state.
 - **Non-Tailscale private networks**: set `use_existing_network`,
   `admin_address` and `admin_interface` in the plan file to use a provider
   private network or a WireGuard peer instead. Tailscale is then not installed.
-- **Undo** restores the old state but leaves Tailscale installed.
+- **Undo** restores the old state but leaves Tailscale installed. It
+  re-enables a ufw that secure-setup retired and unmasks firewalld (start it
+  again yourself, it conflicts with `nftables.service`).
 - Debian's `nftables.service` flushes the ruleset when stopped. Reload with
   `nft -f /etc/nftables.conf`; do not stop the service on a live box.
 

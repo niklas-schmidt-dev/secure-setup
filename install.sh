@@ -8,7 +8,7 @@
 #     curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh | sh -s -- here
 #
 #   Unattended, e.g. in cloud-init, with a Tailscale auth key:
-#     TS_AUTHKEY=tskey-auth-... sh -c "$(curl -fsSL .../install.sh)" -- here --yes
+#     see examples/cloud-init.yaml (the auth key comes from a root-only file)
 #
 # Arguments after the script are passed to secure-setup. Without arguments
 # the wizard for a remote server starts.

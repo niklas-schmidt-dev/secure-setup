@@ -1,16 +1,30 @@
 #cloud-config
-# Lock a new server down at first boot, before anyone can reach it: Tailscale
-# joins with the auth key, sshd goes keys-only, nftables allows SSH only over
-# the tailnet and HTTPS only from Cloudflare. The run confirms itself with
-# self-checks (nobody can log in yet), then you connect over the tailnet.
+# Lock a new server down at first boot: Tailscale joins with the auth key,
+# sshd goes keys-only, nftables allows SSH only over the tailnet and HTTPS only
+# from Cloudflare. The run confirms itself with self-checks, then you connect
+# over the tailnet.
+#
+# Until the new rules are live (a few minutes after boot) the server is as
+# reachable as the provider image makes it, and it stays that way if the run
+# fails. Check the log below, or add a provider firewall, before relying on it.
 #
 # Paste this as "cloud-init user data" when creating the server (Hetzner:
 # "Cloud config"; DigitalOcean: "User data"; most providers have the field).
-# Replace the auth key with one from https://login.tailscale.com/admin/settings/keys
-# (reusable off, ephemeral off, tags as you like). Keep your SSH key in the
-# provider's "SSH keys" field: password login is turned off at the end.
+# Replace the auth key with one from https://login.tailscale.com/admin/settings/keys:
+# single-use (reusable off), ephemeral off, a short expiry, tags as you like.
+# User data stays readable on the instance (and often to local processes
+# through the provider's metadata service), so a single-use key that is spent
+# at first boot is the one to use. Keep your SSH key in the provider's
+# "SSH keys" field: password login is turned off at the end.
 #
 # Afterwards:   ssh root@<server name>      (over your tailnet)
-# Progress:     /var/log/secure-setup-firstboot.log on the server
+# Progress:     /var/log/secure-setup-firstboot.log on the server (root only)
+write_files:
+  # The key goes into a root-only file instead of the command line, where any
+  # local user could read it from the process list while the run lasts.
+  - path: /root/secure-setup.env
+    permissions: "0600"
+    content: |
+      TS_AUTHKEY=tskey-auth-REPLACE-ME
 runcmd:
-  - [ sh, -c, "TS_AUTHKEY=tskey-auth-REPLACE-ME sh -c \"$(curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh)\" -- here --yes > /var/log/secure-setup-firstboot.log 2>&1" ]
+  - [ sh, -c, "umask 077; set -a; . /root/secure-setup.env; set +a; rm -f /root/secure-setup.env; curl -fsSL --proto '=https' -o /root/secure-setup-install.sh https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh && sh /root/secure-setup-install.sh here --yes > /var/log/secure-setup-firstboot.log 2>&1" ]

@@ -11,6 +11,12 @@ else
 	nft delete table inet secure_setup 2>/dev/null || true
 	msg="firewall table removed (no previous state to restore)"
 fi
+if [ -e "$STATE/ufw-was-active" ]; then
+	if ufw --force enable >/dev/null 2>&1; then msg="$msg; ufw re-enabled"; else msg="$msg; ufw could NOT be re-enabled"; fi
+fi
+if [ -e "$STATE/firewalld-was-active" ]; then
+	if systemctl start firewalld >/dev/null 2>&1; then msg="$msg; firewalld restarted"; else msg="$msg; firewalld could NOT be restarted"; fi
+fi
 date -u +%Y-%m-%dT%H:%M:%SZ > "$STATE/rolled-back"
 echo "secure-setup: $msg"
 logger -t secure-setup "$msg: the new rules were not confirmed in time" 2>/dev/null || true
