@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 	"time"
 	"unicode"
@@ -103,6 +104,7 @@ type Runner struct {
 	sshdPrev   string // the sshd drop-in an earlier run left; restored on failure
 
 	tsSSHPaused  bool // Tailscale SSH was on and is off for this run (remote mode)
+	viaTailnet   bool // the run's connection itself goes over the tailnet (a locked-down server)
 	joined       bool // this run joined the tailnet
 	joinedByLink bool // a login link was shown and the tailnet is not yet known to be the operator's
 }
@@ -317,8 +319,14 @@ func (r *Runner) connect(ctx context.Context, log func(string)) error {
 	if f.Tailscale {
 		log("tailscale installed, state: " + orUnknown(f.TailscaleState))
 		// Tailscale SSH takes over port 22 on the tailnet address, where the
-		// run checks sshd; it comes back as the last step.
+		// run checks sshd; it comes back as the last step. Over a connection
+		// that itself runs over the tailnet, switching it would cut that
+		// connection, and a refused login afterwards could not be undone.
+		r.viaTailnet = !p.Tailscale.UseExisting && tailnetAddr(c.RemoteIP())
 		if !p.Tailscale.UseExisting && remote.TailscaleSSHOn(ctx, c) {
+			if r.viaTailnet {
+				return errors.New("this server runs Tailscale SSH and this connection goes over the tailnet, so pausing it for the run would cut the connection. Turn it off on the server first (`tailscale set --ssh=false`) or run `secure-setup here` there")
+			}
 			if err := remote.TailscaleSetSSH(ctx, c, false, log); err != nil {
 				return err
 			}
@@ -528,6 +536,11 @@ func (r *Runner) reachAdmin(ctx context.Context, log func(string)) (err error) {
 // through it must work, or it goes off again so sshd with the key stays
 // reachable over the tailnet.
 func (r *Runner) finishTailscaleSSH(ctx context.Context, log func(string)) error {
+	if r.viaTailnet {
+		r.result.TailscaleSSH = "off: not switched on over a tailnet connection (it would cut that connection, and a refused login could not be undone); run `tailscale set --ssh` on the server"
+		log("not turning Tailscale SSH on: this run is connected over the tailnet")
+		return nil
+	}
 	if err := remote.TailscaleSetSSH(ctx, r.pub, true, log); err != nil {
 		return err
 	}
@@ -538,7 +551,8 @@ func (r *Runner) finishTailscaleSSH(ctx context.Context, log func(string)) error
 		// The tailnet policy's "check" action asks for a browser login here.
 		r.attention("Tailscale SSH: " + strings.TrimSpace(msg))
 	}
-	target := net.JoinHostPort(r.result.AdminAddress, fmt.Sprint(r.facts.SSHPort))
+	// Tailscale SSH answers port 22 only, whatever port sshd uses.
+	target := net.JoinHostPort(r.result.AdminAddress, "22")
 	log("checking a new login to " + target + " through Tailscale SSH")
 	dctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	c, err := sshx.Dial(dctx, target, auth, sshx.HostKeyPolicy{Expect: r.hostKey, Warn: log})
@@ -550,7 +564,10 @@ func (r *Runner) finishTailscaleSSH(ctx context.Context, log func(string)) error
 		return nil
 	}
 	log("a login through Tailscale SSH did not work (" + shortErr(err) + "); switching it off again")
-	if oerr := remote.TailscaleSetSSH(ctx, r.pub, false, log); oerr != nil {
+	// Its own context: an interrupted check must still switch it off.
+	octx, ocancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer ocancel()
+	if oerr := remote.TailscaleSetSSH(octx, r.pub, false, log); oerr != nil {
 		return fmt.Errorf("a login through Tailscale SSH failed (%v) and switching it off failed too: %w; run `tailscale set --ssh=false` on the server", err, oerr)
 	}
 	r.result.TailscaleSSH = "off: a login through it did not work (" + shortErr(err) + "); sshd with your key works. Try `tailscale set --ssh` on the server once your tailnet policy allows you in"
@@ -905,4 +922,10 @@ func shortErr(err error) string {
 		s = s[:157] + "..."
 	}
 	return s
+}
+
+// tailnetAddr reports whether ip is a Tailscale address (100.64.0.0/10 or
+// fd7a:115c:a1e0::/48).
+func tailnetAddr(ip netip.Addr) bool {
+	return netip.MustParsePrefix("100.64.0.0/10").Contains(ip) || netip.MustParsePrefix("fd7a:115c:a1e0::/48").Contains(ip)
 }
