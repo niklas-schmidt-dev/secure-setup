@@ -69,6 +69,7 @@ type Facts struct {
 
 	UFWActive        bool
 	FirewalldActive  bool
+	FirewalldEnabled bool   // enabled at boot, even if not running now
 	SecureSetupTable bool   // our nftables table is already loaded
 	RolledBack       string // timestamp of a previous rollback, if any
 	RollbackArmed    bool   // a rollback timer from an earlier run is still active
@@ -116,6 +117,7 @@ wan=$(ip -o -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i==
 if [ -n "$wan" ]; then printf 'WANIP=%s\n' "$(ip -o -4 addr show dev "$wan" 2>/dev/null | awk '{print $4; exit}' | cut -d/ -f1)"; fi
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then echo UFW=1; else echo UFW=0; fi
 if systemctl is-active --quiet firewalld 2>/dev/null; then echo FIREWALLD=1; else echo FIREWALLD=0; fi
+if systemctl is-enabled --quiet firewalld 2>/dev/null; then echo FIREWALLD_ENABLED=1; else echo FIREWALLD_ENABLED=0; fi
 if command -v nft >/dev/null 2>&1 && nft list table inet secure_setup >/dev/null 2>&1; then echo SS_TABLE=1; else echo SS_TABLE=0; fi
 if [ -f /var/lib/secure-setup/rolled-back ]; then printf 'ROLLED_BACK=%s\n' "$(cat /var/lib/secure-setup/rolled-back)"; fi
 if systemctl is-active --quiet secure-setup-rollback.timer 2>/dev/null; then echo ROLLBACK_ARMED=1; fi
@@ -145,6 +147,7 @@ func Detect(ctx context.Context, c Host) (*Facts, error) {
 		Docker:           kv["DOCKER"] == "1",
 		UFWActive:        kv["UFW"] == "1",
 		FirewalldActive:  kv["FIREWALLD"] == "1",
+		FirewalldEnabled: kv["FIREWALLD_ENABLED"] == "1",
 		SecureSetupTable: kv["SS_TABLE"] == "1",
 		RolledBack:       kv["ROLLED_BACK"],
 		RollbackArmed:    kv["ROLLBACK_ARMED"] == "1",

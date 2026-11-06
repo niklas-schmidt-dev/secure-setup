@@ -68,7 +68,10 @@ type Firewall struct {
 	TailnetAll      bool   `json:"tailnet_all"`
 	RollbackSeconds int    `json:"rollback_seconds"`
 	WANInterface    string `json:"wan_interface,omitempty"`
-	CloudflareSync  bool   `json:"cloudflare_sync"`
+	// WANOverride confirms that WANInterface deliberately differs from the
+	// interface of the server's default route.
+	WANOverride    bool `json:"wan_interface_override,omitempty"`
+	CloudflareSync bool `json:"cloudflare_sync"`
 	// ConfirmBy applies to local runs only: "login" (default) or "self".
 	ConfirmBy string `json:"confirm_by,omitempty"`
 }

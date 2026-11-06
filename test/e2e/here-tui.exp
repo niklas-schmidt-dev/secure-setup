@@ -3,6 +3,8 @@
 # and review are answered with defaults, then the run waits for a login,
 # which test/e2e/run-here.sh provides from the client container.
 set timeout 60
+# The server's private address, passed in by run-here.sh, dots escaped.
+set prv [string map {. {\.}} $env(E2E_PRIVATE_IP)]
 log_user 1
 spawn secure-setup here -f /root/plan-login.json
 stty rows 40 columns 120 < $spawn_out(slave,name)
@@ -27,7 +29,7 @@ expect {
 }
 set timeout 120
 expect {
-  -re {ssh root@10\.250\.101\.[0-9]+} { puts "\nWALK: waiting for login" }
+  -re "ssh root@$prv" { puts "\nWALK: waiting for login" }
   timeout { puts "\nWALK: FAIL run never asked for a login"; exit 1 }
 }
 expect {

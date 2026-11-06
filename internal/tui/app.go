@@ -561,7 +561,9 @@ func (m *model) advance() (tea.Model, tea.Cmd) {
 		if m.local != nil {
 			m.savedPath = plan.LocalSavePath
 		}
-		if err := p.Save(m.savedPath); err != nil {
+		saved := *p
+		saved.Firewall.WANInterface = "" // a host fact: detected again on every replay
+		if err := saved.Save(m.savedPath); err != nil {
 			m.savedPath = ""
 		}
 		m.phase = phaseReview
@@ -721,7 +723,7 @@ func (m *model) View() string {
 		b.WriteString(m.doneView())
 	default:
 		if m.err != nil {
-			b.WriteString(errorBox.Width(clamp(m.width-2, 20, 100)).Render(errStyle.Render("Could not continue: ") + m.err.Error()))
+			b.WriteString(errorBox.Width(clamp(m.width-2, 20, 100)).Render(errStyle.Render("Could not continue: ") + runner.Printable(m.err.Error())))
 			b.WriteString("\n\n")
 		}
 		if m.form != nil {
@@ -778,7 +780,7 @@ func (m *model) doneView() string {
 	b.WriteString(headerStyle.Render(titleStyle.Render("secure-setup") + mutedStyle.Render("  "+m.target())))
 	b.WriteString("\n")
 	if m.runErr != nil {
-		b.WriteString(errorBox.Width(clamp(m.width-2, 20, 100)).Render(errStyle.Render("Setup did not finish\n\n") + m.runErr.Error()))
+		b.WriteString(errorBox.Width(clamp(m.width-2, 20, 100)).Render(errStyle.Render("Setup did not finish\n\n") + runner.Printable(m.runErr.Error())))
 		b.WriteString("\n\n")
 		b.WriteString("Last output:\n")
 		tail := m.logs
@@ -810,7 +812,7 @@ func Summary(p *plan.Plan, r *runner.Result) string {
 		return ""
 	}
 	var b strings.Builder
-	line := func(k, v string) { fmt.Fprintf(&b, "%-24s %s\n", k, v) }
+	line := func(k, v string) { fmt.Fprintf(&b, "%-24s %s\n", k, runner.Printable(v)) }
 	target := r.AdminAddress
 	if r.DNSName != "" {
 		target = r.DNSName

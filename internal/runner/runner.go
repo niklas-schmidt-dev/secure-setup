@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/crypto/ssh"
 
@@ -93,6 +94,7 @@ type Runner struct {
 	before     []remote.Session // sshd sessions before the firewall was applied
 	applyEpoch int64            // server clock when the rules went live
 	tsState    *remote.TSStatus
+	sshdPrev   string // the sshd drop-in an earlier run left; restored on failure
 }
 
 type step struct {
@@ -105,6 +107,13 @@ type step struct {
 func New(o Options) *Runner {
 	if o.Report == nil {
 		o.Report = func(Event) {}
+	}
+	// Event text carries output from the server (journal lines, peer names,
+	// command output); it must not drive the operator's terminal.
+	report := o.Report
+	o.Report = func(e Event) {
+		e.Text = Printable(e.Text)
+		report(e)
 	}
 	if o.LocalTailscaleReady == nil {
 		o.LocalTailscaleReady = LocalTailscaleReady
@@ -177,11 +186,33 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 		log := func(line string) { r.o.Report(Event{Kind: Log, Step: i, Text: line}) }
 		if err := s.run(ctx, log); err != nil {
 			r.o.Report(Event{Kind: StepFailed, Step: i, Text: err.Error()})
+			r.revertLocalHardening(log)
 			return nil, fmt.Errorf("%s: %w", s.name, err)
 		}
 		r.o.Report(Event{Kind: StepDone, Step: i})
 	}
 	return &r.result, nil
+}
+
+// revertLocalHardening removes the keys-only sshd change after a local run
+// failed or rolled back. A local run cannot prove that the operator holds a
+// key that works, so it does not leave password login off behind a failure.
+func (r *Runner) revertLocalHardening(log func(string)) {
+	if r.local == nil || !r.result.Hardened {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := remote.RestoreSSHD(ctx, r.local, r.sshdPrev, log); err != nil {
+		log("could not revert the sshd hardening: " + shortErr(err))
+		return
+	}
+	r.result.Hardened = false
+	if r.sshdPrev != "" {
+		log("sshd is back to the hardening of the earlier run because this run did not complete")
+		return
+	}
+	log("password login restored because the run did not complete")
 }
 
 func (r *Runner) attention(step int, text string) {
@@ -242,11 +273,8 @@ func (r *Runner) connect(ctx context.Context, log func(string)) error {
 	if f.PkgMgr == "" {
 		return errors.New("no supported package manager found (apt-get, dnf, yum, pacman, zypper)")
 	}
-	if f.WANIface == "" && p.Firewall.WANInterface == "" {
-		return errors.New("could not find the interface with the default route; set wan_interface in the plan")
-	}
-	if p.Firewall.WANInterface == "" {
-		p.Firewall.WANInterface = f.WANIface
+	if err := resolveWAN(ctx, c, p, f, log); err != nil {
+		return err
 	}
 	if f.Docker {
 		log("docker found: published container ports will only be reachable from Cloudflare on the web ports")
@@ -437,7 +465,10 @@ func (r *Runner) dialAdminRetry(ctx context.Context, target string, wait time.Du
 }
 
 func (r *Runner) hardenSSH(ctx context.Context, log func(string)) error {
-	if err := remote.HardenSSHD(ctx, r.admin, log); err != nil {
+	prev, err := remote.HardenSSHD(ctx, r.admin, log)
+	r.sshdPrev = prev
+	if err != nil {
+		_ = remote.RestoreSSHD(ctx, r.admin, prev, log)
 		return err
 	}
 	auth := r.auth()
@@ -458,7 +489,7 @@ func (r *Runner) hardenSSH(ctx context.Context, log func(string)) error {
 		}
 		if time.Now().After(deadline) {
 			log("key login no longer works, reverting the sshd change: " + shortErr(err))
-			if rerr := remote.RevertSSHD(ctx, r.admin, log); rerr != nil {
+			if rerr := remote.RestoreSSHD(ctx, r.admin, r.sshdPrev, log); rerr != nil {
 				return fmt.Errorf("key login failed (%v) and the revert failed too: %w", err, rerr)
 			}
 			return fmt.Errorf("key-only login did not work, sshd hardening was reverted: %w", err)
@@ -470,7 +501,50 @@ func (r *Runner) hardenSSH(ctx context.Context, log func(string)) error {
 		}
 	}
 	log("key-only login verified over the private network")
+	if err := verifyKeysOnly(ctx, r.admin, r.o.Plan.Server.User, r.result.AdminAddress, r.facts.SSHPort, r.sshdPrev, log); err != nil {
+		return err
+	}
 	r.result.Hardened = true
+	return nil
+}
+
+// verifyKeysOnly checks sshd's effective per-connection policy after the
+// hardening and reverts it when passwords are still accepted anywhere.
+func verifyKeysOnly(ctx context.Context, host remote.Host, user, laddr string, port int, prev string, log func(string)) error {
+	if user == "" {
+		user = "root"
+	}
+	err := remote.VerifySSHD(ctx, host, user, laddr, port, "100.64.0.1", "10.0.0.1", "192.168.0.1", "203.0.113.1")
+	if err == nil {
+		log("sshd's effective policy: password and keyboard-interactive login off")
+		return nil
+	}
+	log("password login is still possible, reverting the sshd change: " + shortErr(err))
+	if rerr := remote.RestoreSSHD(ctx, host, prev, log); rerr != nil {
+		return fmt.Errorf("%v, and the revert failed too: %w", err, rerr)
+	}
+	return fmt.Errorf("sshd hardening did not take effect and was reverted: %w", err)
+}
+
+// resolveWAN picks the internet interface for the forward chain. A value in
+// the plan that differs from this server's default-route interface (for
+// example from a plan saved on another server) must exist here and be
+// confirmed with wan_interface_override.
+func resolveWAN(ctx context.Context, host remote.Host, p *plan.Plan, f *remote.Facts, log func(string)) error {
+	switch {
+	case p.Firewall.WANInterface == "" && f.WANIface == "":
+		return errors.New("could not find the interface with the default route; set wan_interface in the plan")
+	case p.Firewall.WANInterface == "":
+		p.Firewall.WANInterface = f.WANIface
+	case p.Firewall.WANInterface != f.WANIface:
+		if !remote.InterfaceExists(ctx, host, p.Firewall.WANInterface) {
+			return fmt.Errorf("the plan's wan_interface %q does not exist on this server (its default route uses %s); remove wan_interface from the plan", p.Firewall.WANInterface, orUnknown(f.WANIface))
+		}
+		if !p.Firewall.WANOverride {
+			return fmt.Errorf("the plan's wan_interface %q differs from this server's default-route interface %s; remove wan_interface from the plan, or set \"wan_interface_override\": true if %q really carries the internet traffic", p.Firewall.WANInterface, orUnknown(f.WANIface), p.Firewall.WANInterface)
+		}
+		log("using wan_interface " + p.Firewall.WANInterface + " from the plan instead of the default-route interface " + orUnknown(f.WANIface))
+	}
 	return nil
 }
 
@@ -624,6 +698,17 @@ func containsInt(xs []int, x int) bool {
 		}
 	}
 	return false
+}
+
+// Printable replaces control characters other than newline and tab, so text
+// that came from the server cannot drive the operator's terminal.
+func Printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || !unicode.IsControl(r) {
+			return r
+		}
+		return '?'
+	}, s)
 }
 
 func orUnknown(s string) string {

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/niklas-schmidt-dev/secure-setup/internal/localhost"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/plan"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/remote"
@@ -89,11 +91,8 @@ func (r *Runner) hereDetect(ctx context.Context, log func(string)) error {
 	if f.PkgMgr == "" {
 		return errors.New("no supported package manager found (apt-get, dnf, yum, pacman, zypper)")
 	}
-	if f.WANIface == "" && p.Firewall.WANInterface == "" {
-		return errors.New("could not find the interface with the default route; set wan_interface in the plan")
-	}
-	if p.Firewall.WANInterface == "" {
-		p.Firewall.WANInterface = f.WANIface
+	if err := resolveWAN(ctx, r.local, p, f, log); err != nil {
+		return err
 	}
 	r.result.PublicAddress = f.WANIPv4
 	r.result.SSHPort = f.SSHPort
@@ -145,24 +144,41 @@ func (r *Runner) hereDetect(ctx context.Context, log func(string)) error {
 		if err != nil {
 			return err
 		}
-		if countKeys(keys) == 0 {
-			if p.Tailscale.SSH && !p.Tailscale.UseExisting {
-				log("no public key in authorized_keys for " + user + "; Tailscale SSH keeps you in after password login is disabled")
+		if n := usableKeys(keys); n == 0 {
+			// Only `tailscale up --ssh` in the Join step turns Tailscale SSH
+			// on, and that step is skipped for a node that is already Running.
+			if p.Tailscale.SSH && !p.Tailscale.UseExisting && f.TailscaleState != "Running" {
+				log("no usable public key in authorized_keys for " + user + "; Tailscale SSH (enabled in the next steps) keeps you in after password login is disabled")
 			} else {
-				r.result.HardenNote = "no public key in ~" + user + "/.ssh/authorized_keys; add one first, or enable Tailscale SSH"
+				r.result.HardenNote = "no usable public key in ~" + user + "/.ssh/authorized_keys; add one first, or enable Tailscale SSH"
 			}
 		} else {
-			log(fmt.Sprintf("%d public key(s) authorized for %s", countKeys(keys), user))
+			log(fmt.Sprintf("%d usable public key(s) authorized for %s", n, user))
 		}
 	}
 	return nil
 }
 
-func countKeys(authorized string) int {
+// usableKeys counts authorized_keys entries that parse as public keys and
+// carry no option that limits where or how they log in.
+func usableKeys(authorized string) int {
 	n := 0
-	for _, l := range strings.Split(authorized, "\n") {
-		l = strings.TrimSpace(l)
-		if l != "" && !strings.HasPrefix(l, "#") {
+	rest := []byte(authorized)
+	for len(rest) > 0 {
+		_, _, opts, next, err := ssh.ParseAuthorizedKey(rest)
+		if err != nil {
+			break
+		}
+		rest = next
+		ok := true
+		for _, o := range opts {
+			name, _, _ := strings.Cut(strings.ToLower(o), "=")
+			switch name {
+			case "command", "from", "cert-authority", "principals", "expiry-time", "restrict":
+				ok = false
+			}
+		}
+		if ok {
 			n++
 		}
 	}
@@ -219,7 +235,10 @@ func (r *Runner) hereCheckPath(ctx context.Context, log func(string)) error {
 }
 
 func (r *Runner) hereHardenSSH(ctx context.Context, log func(string)) error {
-	if err := remote.HardenSSHD(ctx, r.local, log); err != nil {
+	prev, err := remote.HardenSSHD(ctx, r.local, log)
+	r.sshdPrev = prev
+	if err != nil {
+		_ = remote.RestoreSSHD(ctx, r.local, prev, log)
 		return err
 	}
 	// sshd -t ran before the reload; make sure the daemon is still there.
@@ -233,7 +252,7 @@ func (r *Runner) hereHardenSSH(ctx context.Context, log func(string)) error {
 		}
 		if time.Now().After(deadline) {
 			log("sshd is not running after the reload, reverting the change")
-			if rerr := remote.RevertSSHD(ctx, r.local, log); rerr != nil {
+			if rerr := remote.RestoreSSHD(ctx, r.local, r.sshdPrev, log); rerr != nil {
 				return fmt.Errorf("sshd did not come back and the revert failed too: %w", rerr)
 			}
 			return errors.New("sshd did not come back after the reload; the hardening was reverted")
@@ -245,6 +264,9 @@ func (r *Runner) hereHardenSSH(ctx context.Context, log func(string)) error {
 		}
 	}
 	log("sshd reloaded with password login off")
+	if err := verifyKeysOnly(ctx, r.local, r.o.Plan.Server.User, r.result.AdminAddress, r.facts.SSHPort, r.sshdPrev, log); err != nil {
+		return err
+	}
 	r.result.Hardened = true
 	return nil
 }
@@ -298,6 +320,7 @@ func (r *Runner) confirmByLogin(ctx context.Context, log func(string)) error {
 	deadline := time.Now().Add(wait)
 	lastNote := time.Now()
 	arrived := false
+	self := remote.LocalAddrs(ctx, r.local)
 	for {
 		if at := r.rollbackMarker(ctx, r.local); at != "" {
 			return r.rolledBackError(at, errors.New("the rollback fired before a login arrived"))
@@ -307,20 +330,22 @@ func (r *Runner) confirmByLogin(ctx context.Context, log func(string)) error {
 			log("confirmed by `secure-setup confirm` in a session from " + by)
 			return r.keepFirewall(ctx, log)
 		}
-		// Three signals, any proves it: a session visible right now on the
-		// private address; or a connection counted by the admin rule plus a
-		// login sshd accepted since the apply (short sessions end between polls).
+		// Only connections that came in through the admin rule count (its
+		// counter is above zero); a local process reaching the admin address
+		// goes over lo and proves nothing. Then either a session from another
+		// machine is visible right now, or sshd logged an accepted login since
+		// the apply (short sessions end between polls).
 		now, err := remote.Sessions(ctx, r.local, r.facts.SSHPort)
 		if err != nil {
 			return err
 		}
-		if fresh := remote.NewSessionsTo(r.before, now, adminAddr); len(fresh) > 0 {
-			peer := fresh[0].Peer.Addr().String()
-			r.result.ConfirmedBy = "login from " + peer
-			log("new SSH session from " + peer + " over " + p.Tailscale.AdminInterface + ": the rules let you in")
-			return r.keepFirewall(ctx, log)
-		}
 		if n, _ := r.adminRuleCounter(ctx); n > 0 {
+			if fresh := remote.NewSessionsTo(r.before, now, adminAddr, self...); len(fresh) > 0 {
+				peer := fresh[0].Peer.Addr().String()
+				r.result.ConfirmedBy = "login from " + peer
+				log("new SSH session from " + peer + " through the " + p.Tailscale.AdminInterface + " rule: the rules let you in")
+				return r.keepFirewall(ctx, log)
+			}
 			if !arrived {
 				arrived = true
 				log(fmt.Sprintf("a connection arrived over %s through the new rule; waiting for the login to complete", p.Tailscale.AdminInterface))
@@ -364,23 +389,40 @@ type AcceptedLogin struct {
 	Method, User, From string
 }
 
-var acceptedRe = regexp.MustCompile(`^Accepted (\S+) for (\S+) from (\S+) port \d+`)
+var (
+	acceptedRe  = regexp.MustCompile(`^Accepted (\S+) for (\S+) from (\S+) port \d+`)
+	loginUserRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}\$?$`)
+)
 
-// acceptedLoginsSince reads sshd's accepted logins from the journal.
+// acceptedLoginsSince reads sshd's accepted logins from the journal. Only
+// entries journald attributes to root count: _UID is set from the sender's
+// credentials, so `logger -t sshd` from another user does not match.
 func acceptedLoginsSince(ctx context.Context, host remote.Host, epoch int64) []AcceptedLogin {
 	if epoch == 0 {
 		return nil
 	}
-	cmd := fmt.Sprintf(`journalctl -q --no-pager -o cat --since=@%d _COMM=sshd + SYSLOG_IDENTIFIER=sshd 2>/dev/null | grep -E '^Accepted ' || true`, epoch-1)
+	cmd := fmt.Sprintf(`journalctl -q --no-pager -o cat --since=@%d _UID=0 _COMM=sshd + _UID=0 SYSLOG_IDENTIFIER=sshd 2>/dev/null | grep -E '^Accepted ' || true`, epoch-1)
 	out, err := host.Output(ctx, cmd)
 	if err != nil {
 		return nil
 	}
+	return parseAcceptedLogins(out)
+}
+
+// parseAcceptedLogins keeps only well-formed lines: a plain user name and an
+// IP address without a zone.
+func parseAcceptedLogins(out string) []AcceptedLogin {
 	var logins []AcceptedLogin
 	for _, line := range strings.Split(out, "\n") {
-		if m := acceptedRe.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
-			logins = append(logins, AcceptedLogin{Method: m[1], User: m[2], From: m[3]})
+		m := acceptedRe.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil || !loginUserRe.MatchString(m[2]) {
+			continue
 		}
+		a, err := netip.ParseAddr(m[3])
+		if err != nil || a.Zone() != "" {
+			continue
+		}
+		logins = append(logins, AcceptedLogin{Method: m[1], User: m[2], From: a.Unmap().String()})
 	}
 	return logins
 }

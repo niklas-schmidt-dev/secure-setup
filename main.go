@@ -18,6 +18,7 @@ import (
 	"github.com/niklas-schmidt-dev/secure-setup/internal/localhost"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/nftgen"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/plan"
+	"github.com/niklas-schmidt-dev/secure-setup/internal/remote"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/runner"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/sshx"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/textui"
@@ -34,7 +35,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "aborted")
 			os.Exit(130)
 		}
-		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintln(os.Stderr, "error:", runner.Printable(err.Error()))
 		os.Exit(1)
 	}
 }
@@ -258,6 +259,9 @@ func describe(p *plan.Plan) string {
 	fmt.Fprintf(&b, "  ping            %v\n", p.Firewall.AllowPing)
 	fmt.Fprintf(&b, "  sshd keys only  %v\n", p.SSH.Harden)
 	fmt.Fprintf(&b, "  rollback        %ds\n", p.Firewall.RollbackSeconds)
+	if p.Firewall.WANInterface != "" {
+		fmt.Fprintf(&b, "  internet iface  %s (from the plan; checked against the server's default route)\n", p.Firewall.WANInterface)
+	}
 	if p.Local {
 		fmt.Fprintf(&b, "  confirmation    %s\n", map[string]string{plan.ConfirmLogin: "a new login over the tailnet", plan.ConfirmSelf: "self-checks (unattended)"}[p.Firewall.ConfirmBy])
 	}
@@ -321,11 +325,17 @@ elif grep -q 'Managed by secure-setup' /etc/nftables.conf 2>/dev/null; then
 	systemctl disable nftables >/dev/null 2>&1 || true
 	echo "removed /etc/nftables.conf and disabled nftables.service at boot"
 fi
+if [ -e /var/lib/secure-setup/ufw-retired ]; then
+	systemctl enable ufw >/dev/null 2>&1 || true
+	if ufw --force enable >/dev/null 2>&1; then echo "ufw re-enabled (it was active before secure-setup)"; else echo "ufw was active before secure-setup; re-enable it with: ufw enable"; fi
+fi
+if [ -e /var/lib/secure-setup/firewalld-retired ]; then
+	systemctl unmask firewalld >/dev/null 2>&1 || true
+	echo "firewalld unmasked; it was in use before secure-setup: start it again with: systemctl enable --now firewalld"
+fi
 rm -rf /etc/secure-setup /var/lib/secure-setup
-if [ -f /etc/ssh/sshd_config.d/00-secure-setup.conf ]; then
-	rm -f /etc/ssh/sshd_config.d/00-secure-setup.conf
-	systemctl reload-or-restart ssh 2>/dev/null || systemctl reload-or-restart sshd
-	echo "sshd hardening removed"
+if [ -f /etc/ssh/sshd_config.d/00-secure-setup.conf ] || grep -q '^# secure-setup: added the next line$' /etc/ssh/sshd_config 2>/dev/null; then
+` + remote.RevertSSHDScript + `	echo "sshd hardening removed"
 fi
 echo "undo complete; Tailscale was left installed"
 `

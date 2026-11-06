@@ -19,7 +19,8 @@ trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 echo "== build linux binary"
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/secure-setup-linux-amd64 .
+bin=${E2E_BINARY:-/tmp/secure-setup-linux-amd64}
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$bin" .
 
 echo "== start server and client"
 d network create --subnet "${E2E_SUBNET_PUBLIC:-10.250.100.0/24}" "$pub" >/dev/null
@@ -28,7 +29,7 @@ d run -d --name "$srv" --privileged --hostname e2e-vps --network "$pub" secure-s
 d network connect "$prv" "$srv"
 d run -d --name "$cli" --network "$pub" secure-setup-e2e-client >/dev/null
 d network connect "$prv" "$cli"
-d cp /tmp/secure-setup-linux-amd64 "$cli:/usr/local/bin/secure-setup"
+d cp "$bin" "$cli:/usr/local/bin/secure-setup"
 d exec "$cli" sh -c 'mkdir -p /root/.ssh && chmod 700 /root/.ssh && ssh-keygen -q -t ed25519 -N "" -f /root/.ssh/id_ed25519'
 pubkey=$(d exec "$cli" cat /root/.ssh/id_ed25519.pub)
 d exec "$srv" sh -c "mkdir -p /root/.ssh && printf '%s\n' '$pubkey' > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys"
@@ -74,7 +75,7 @@ d exec -i "$cli" sh -c 'cat > /root/plan-bad.json' <<JSON
 {
   "server": {"host": "$prvip", "port": 22, "user": "root", "key_path": "/root/.ssh/id_ed25519"},
   "tailscale": {"admin_interface": "eth0", "udp_port": 41641, "use_existing_network": true, "admin_address": "$prvip"},
-  "firewall": {"web_ports": [443], "allow_ping": true, "tailnet_ports": [22], "rollback_seconds": 30, "cloudflare_sync": true, "wan_interface": "eth1"},
+  "firewall": {"web_ports": [443], "allow_ping": true, "tailnet_ports": [22], "rollback_seconds": 30, "cloudflare_sync": true, "wan_interface": "eth1", "wan_interface_override": true},
   "ssh": {"harden": false, "add_local_key": false}
 }
 JSON
