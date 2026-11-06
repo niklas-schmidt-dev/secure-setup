@@ -103,39 +103,50 @@ func (r *Runner) rebootAndCheck(ctx context.Context, log func(string)) error {
 	}
 	target := net.JoinHostPort(r.result.AdminAddress, fmt.Sprint(port))
 	log("waiting for the server to come back on " + target)
-	deadline := time.Now().Add(5 * time.Minute)
+	auth := r.auth()
+	if r.result.Hardened {
+		auth.Password = "" // password login is off now
+	}
+	if expect.TailscaleSSH {
+		auth.Banner = func(msg string) { r.attention("Tailscale SSH: " + strings.TrimSpace(msg)) }
+	}
+	// One deadline for the whole wait; every attempt, including the commands
+	// on a connection, ends with it.
+	wctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	var last error
 	for {
-		if time.Now().After(deadline) {
-			return errors.New("the server did not come back over the private network within 5 minutes after the reboot; check it in the provider's console")
-		}
-		if err := sleepCtx(ctx, 5*time.Second); err != nil {
-			return err
+		if err := sleepCtx(wctx, 5*time.Second); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("the server did not come back over the private network within 5 minutes after the reboot (last: %v); check it in the provider's console", last)
 		}
 		d := net.Dialer{Timeout: 5 * time.Second}
-		conn, err := d.DialContext(ctx, "tcp", target)
+		conn, err := d.DialContext(wctx, "tcp", target)
 		if err != nil {
+			last = err
 			continue
 		}
 		conn.Close()
-		auth := r.auth()
-		auth.Password = ""
-		if expect.TailscaleSSH {
-			auth.Banner = func(msg string) { r.attention("Tailscale SSH: " + strings.TrimSpace(msg)) }
-		}
-		dctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-		c, err := sshx.Dial(dctx, target, auth, sshx.HostKeyPolicy{Expect: r.hostKey, Warn: log})
-		cancel()
+		c, err := sshx.Dial(wctx, target, auth, sshx.HostKeyPolicy{Expect: r.hostKey, Warn: log})
 		if err != nil {
+			last = err
 			log("not back yet: " + shortErr(err))
 			continue
 		}
-		if err := c.EnsureRoot(ctx); err != nil {
-			c.Close()
-			return err
+		stop := context.AfterFunc(wctx, func() { c.Close() })
+		mark := ""
+		err = c.EnsureRoot(wctx)
+		if err == nil {
+			mark, err = remote.BootMark(wctx, c)
 		}
-		mark, err := remote.BootMark(ctx, c)
-		if err != nil || mark == before {
-			c.Close() // still the old boot: the reboot has not begun
+		if !stop() || err != nil || mark == before {
+			// Out of time, the old boot shutting down, or not rebooted yet.
+			if err != nil {
+				last = err
+			}
+			c.Close()
 			continue
 		}
 		r.admin = c
