@@ -71,6 +71,7 @@ func (r *Runner) localSteps() []step {
 		{name: "Apply the firewall with a rollback timer", run: r.hereApplyFirewall},
 		{name: confirmName, run: confirm},
 		{name: "Verify", run: r.hereVerify},
+		{name: "Reboot and check after the boot", skip: r.skipReboot, run: r.hereReboot},
 	}
 }
 

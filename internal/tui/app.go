@@ -268,11 +268,14 @@ func (m *model) firewallForm() *huh.Form {
 				huh.NewOption("Self-checks only (unattended)", plan.ConfirmSelf),
 			).Value(&m.confirmBy))
 	}
-	// Its own page, so the firewall page still fits a small terminal.
+	// Their own page, so the firewall page still fits a small terminal.
 	update := huh.NewConfirm().Title("Update the system first?").
 		Description("Installs pending package updates (apt upgrade, dnf upgrade, ...) before anything else. Recommended.").
 		Affirmative("Yes").Negative("No").Value(&m.plan.UpdateSystem)
-	return huh.NewForm(huh.NewGroup(fields...), huh.NewGroup(update)).WithShowHelp(true)
+	reboot := huh.NewConfirm().Title("Reboot at the end and check that everything comes back?").
+		Description("The real test that the rules, Tailscale and sshd survive a restart. Recommended.").
+		Affirmative("Yes").Negative("No").Value(&m.plan.Reboot)
+	return huh.NewForm(huh.NewGroup(fields...), huh.NewGroup(update, reboot)).WithShowHelp(true)
 }
 
 func (m *model) reviewForm() *huh.Form {
@@ -316,6 +319,7 @@ func (m *model) summary() string {
 	line("Ping", yesNo(p.Firewall.AllowPing))
 	line("Password login", map[bool]string{true: "disabled (keys only)", false: "unchanged"}[p.SSH.Harden])
 	line("System update", map[bool]string{true: "first, before anything is installed", false: "skipped"}[p.UpdateSystem])
+	line("Reboot", map[bool]string{true: "at the end, then check that everything comes back", false: "no"}[p.Reboot])
 	line("Everything else", "dropped")
 	line("Rollback window", fmt.Sprintf("%d seconds", p.Firewall.RollbackSeconds))
 	if m.local != nil {
@@ -870,7 +874,12 @@ func Summary(p *plan.Plan, r *runner.Result) string {
 	case r.TailscaleSSH != "":
 		warn("Tailscale SSH", r.TailscaleSSH)
 	}
-	if r.RebootNeeded {
+	switch {
+	case r.RebootChecked:
+		line("Reboot", "done; rules, Tailscale and sshd came back on their own")
+	case r.RebootScheduled:
+		line("Reboot", "in 15 seconds; the check after the boot writes /var/log/secure-setup-bootcheck.log and your next login message")
+	case r.RebootNeeded:
 		warn("Reboot", "recommended: the system update needs it to finish")
 	}
 	line("Rules", "/etc/nftables.conf (nft list ruleset)")

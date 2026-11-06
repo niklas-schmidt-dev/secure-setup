@@ -81,6 +81,8 @@ type Result struct {
 	HardenNote      string // why hardening was skipped, if it was
 	WebPorts        []int
 	RebootNeeded    bool   // the system update needs a reboot to finish
+	RebootChecked   bool   // rebooted, and the lockdown came back on its own
+	RebootScheduled bool   // local run: reboots shortly; the boot check reports
 	TailscaleSSH    string // "on", or why it stayed off; "" when not requested
 }
 
@@ -180,6 +182,7 @@ func New(o Options) *Runner {
 			}
 			return ""
 		}, run: r.finishTailscaleSSH},
+		{name: "Reboot and check", skip: r.skipReboot, run: r.rebootAndCheck},
 	}
 	return r
 }
@@ -589,6 +592,13 @@ func (r *Runner) resumeTailscaleSSH(log func(string)) {
 	r.tsSSHPaused = false
 }
 
+func (r *Runner) skipReboot() string {
+	if !r.o.Plan.Reboot {
+		return "not requested"
+	}
+	return ""
+}
+
 func (r *Runner) skipUpdate() string {
 	if !r.o.Plan.UpdateSystem {
 		return "not requested"
@@ -688,7 +698,7 @@ func verifyKeysOnly(ctx context.Context, host remote.Host, user, laddr string, p
 	if user == "" {
 		user = "root"
 	}
-	err := remote.VerifySSHD(ctx, host, user, laddr, port, "100.64.0.1", "10.0.0.1", "192.168.0.1", "203.0.113.1")
+	err := remote.VerifySSHD(ctx, host, user, laddr, port, keysOnlyPeers...)
 	if err == nil {
 		log("sshd's effective policy: password and keyboard-interactive login off")
 		return nil
@@ -870,21 +880,35 @@ func (r *Runner) verify(ctx context.Context, log func(string)) error {
 
 	// A brand-new TCP connection to the public address must now be blocked.
 	// (The connection from step 1 survives: it is an established flow.)
-	d := net.Dialer{Timeout: 6 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", p.Address())
-	if err == nil {
-		conn.Close()
+	open, detail := r.publicSSHOpen(ctx)
+	if open {
 		r.result.PublicSSHClosed = false
 		r.result.PublicSSHNote = "a new connection to " + p.Address() + " still succeeds. If this address is not the server's internet interface (" + p.Firewall.WANInterface + "), that is expected; otherwise check the WAN interface name."
 		r.attention(r.result.PublicSSHNote)
 		return nil
 	}
 	r.result.PublicSSHClosed = true
-	log("new connection to " + p.Address() + " from here: blocked (" + shortErr(err) + ")")
+	log("new connection to " + p.Address() + " from here: blocked (" + detail + ")")
 	return nil
 }
 
+// publicSSHOpen reports whether a brand-new connection to the server's public
+// SSH address still succeeds.
+func (r *Runner) publicSSHOpen(ctx context.Context) (bool, string) {
+	d := net.Dialer{Timeout: 6 * time.Second}
+	conn, err := d.DialContext(ctx, "tcp", r.o.Plan.Address())
+	if err != nil {
+		return false, shortErr(err)
+	}
+	conn.Close()
+	return true, ""
+}
+
 // ---- helpers ----
+
+// keysOnlyPeers are the connections whose effective sshd policy is checked:
+// a tailnet peer, private ranges and an internet address.
+var keysOnlyPeers = []string{"100.64.0.1", "10.0.0.1", "192.168.0.1", "203.0.113.1"}
 
 func containsInt(xs []int, x int) bool {
 	for _, v := range xs {

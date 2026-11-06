@@ -2,8 +2,11 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -157,17 +160,18 @@ func TestLeaveUnverifiedTailnet(t *testing.T) {
 func TestStepOrder(t *testing.T) {
 	p := plan.Default()
 	remoteSteps := New(Options{Plan: &p}).Steps()
-	if remoteSteps[1] != "Update the system" || remoteSteps[len(remoteSteps)-1] != "Turn on Tailscale SSH" {
+	n := len(remoteSteps)
+	if remoteSteps[1] != "Update the system" || remoteSteps[n-2] != "Turn on Tailscale SSH" || remoteSteps[n-1] != "Reboot and check" {
 		t.Fatalf("remote steps: %q", remoteSteps)
 	}
 	lp := plan.Default()
 	lp.Local = true
 	localSteps := New(Options{Plan: &lp, Local: &localhost.Host{}}).Steps()
-	if localSteps[1] != "Update the system" {
+	if localSteps[1] != "Update the system" || localSteps[len(localSteps)-1] != "Reboot and check after the boot" {
 		t.Fatalf("local steps: %q", localSteps)
 	}
-	if !plan.Default().UpdateSystem {
-		t.Fatal("the system update is not on by default")
+	if !plan.Default().UpdateSystem || !plan.Default().Reboot {
+		t.Fatal("the system update and the reboot check are not on by default")
 	}
 }
 
@@ -176,5 +180,86 @@ func TestTailnetAddr(t *testing.T) {
 		if got := tailnetAddr(netip.MustParseAddr(ip)); got != want {
 			t.Fatalf("%s: %v", ip, got)
 		}
+	}
+}
+
+// lockdownHost answers the commands CheckLockdown runs.
+type lockdownHost struct {
+	fakeHost
+	table, enabled, tsState, tsSSH, passwords string
+	written                                   map[string]string
+}
+
+func (h *lockdownHost) Output(_ context.Context, cmd string) (string, error) {
+	switch {
+	case strings.HasPrefix(cmd, "nft list table"):
+		if h.table == "" {
+			return "", errors.New("exit status 1")
+		}
+		return h.table, nil
+	case strings.HasPrefix(cmd, "systemctl is-enabled nftables"):
+		return h.enabled, nil
+	case cmd == "tailscale status --json":
+		return `{"BackendState":"` + h.tsState + `"}`, nil
+	case cmd == "tailscale debug prefs":
+		return `{"RunSSH": ` + h.tsSSH + `}`, nil
+	case strings.Contains(cmd, "-T -C"):
+		return "passwordauthentication " + h.passwords + "\nkbdinteractiveauthentication no", nil
+	case strings.Contains(cmd, "awk"):
+		return "", nil // no Match block enables passwords
+	}
+	return "", nil
+}
+
+func (h *lockdownHost) WriteFile(_ context.Context, path string, data []byte, _ string) error {
+	if h.written == nil {
+		h.written = map[string]string{}
+	}
+	h.written[path] = string(data)
+	return nil
+}
+
+func goodHost() *lockdownHost {
+	return &lockdownHost{table: "table inet secure_setup {}", enabled: "enabled", tsState: "Running", tsSSH: "true", passwords: "no"}
+}
+
+func TestCheckLockdown(t *testing.T) {
+	e := BootExpect{Tailscale: true, TailscaleSSH: true, Hardened: true, User: "root", AdminAddress: "100.64.0.2", SSHPort: 22}
+	if p := CheckLockdown(context.Background(), goodHost(), e); len(p) != 0 {
+		t.Fatalf("healthy server reported %q", p)
+	}
+	for name, broken := range map[string]func(*lockdownHost){
+		"rules not loaded":      func(h *lockdownHost) { h.table = "" },
+		"nftables not enabled":  func(h *lockdownHost) { h.enabled = "disabled" },
+		"tailscale not running": func(h *lockdownHost) { h.tsState = "NeedsLogin" },
+		"tailscale ssh off":     func(h *lockdownHost) { h.tsSSH = "false" },
+		"passwords back on":     func(h *lockdownHost) { h.passwords = "yes" },
+	} {
+		h := goodHost()
+		broken(h)
+		if p := CheckLockdown(context.Background(), h, e); len(p) != 1 {
+			t.Fatalf("%s: problems %q", name, p)
+		}
+	}
+}
+
+// The boot check reads what the run expected, writes the result to the log
+// and the login message, and fails when something did not come back.
+func TestBootCheck(t *testing.T) {
+	bootCheckWait = 0
+	bootCheckExpectPath = filepath.Join(t.TempDir(), "bootcheck.json")
+	data, _ := json.Marshal(BootExpect{Tailscale: true, TailscaleSSH: true, Hardened: true, User: "root", AdminAddress: "100.64.0.2", SSHPort: 22})
+	if err := os.WriteFile(bootCheckExpectPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := goodHost()
+	msg, err := BootCheck(context.Background(), h)
+	if err != nil || !strings.Contains(msg, "all checks passed") || h.written[remote.BootCheckLog] != msg || h.written[remote.BootCheckMotd] != msg {
+		t.Fatalf("healthy: %v %q %v", err, msg, h.written)
+	}
+	h = goodHost()
+	h.table = ""
+	if msg, err := BootCheck(context.Background(), h); err == nil || !strings.Contains(msg, "PROBLEMS: the firewall rules are not loaded") {
+		t.Fatalf("broken: %v %q", err, msg)
 	}
 }
