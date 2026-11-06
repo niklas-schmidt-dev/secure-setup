@@ -161,6 +161,9 @@ func TestStepOrder(t *testing.T) {
 	p := plan.Default()
 	remoteSteps := New(Options{Plan: &p}).Steps()
 	n := len(remoteSteps)
+	if !before(remoteSteps, "Cloudflare Tunnel", "Stage the firewall") {
+		t.Fatalf("remote steps: %q", remoteSteps)
+	}
 	if remoteSteps[1] != "Update the system" || remoteSteps[n-2] != "Turn on Tailscale SSH" || remoteSteps[n-1] != "Reboot and check" {
 		t.Fatalf("remote steps: %q", remoteSteps)
 	}
@@ -187,6 +190,7 @@ func TestTailnetAddr(t *testing.T) {
 type lockdownHost struct {
 	fakeHost
 	table, enabled, tsState, tsSSH, passwords string
+	tunnelDown                                bool
 	written                                   map[string]string
 }
 
@@ -207,6 +211,11 @@ func (h *lockdownHost) Output(_ context.Context, cmd string) (string, error) {
 		return "passwordauthentication " + h.passwords + "\nkbdinteractiveauthentication no", nil
 	case strings.Contains(cmd, "awk"):
 		return "", nil // no Match block enables passwords
+	case strings.Contains(cmd, "/ready"):
+		if h.tunnelDown {
+			return "", errors.New("exit status 7")
+		}
+		return "", nil
 	}
 	return "", nil
 }
@@ -224,7 +233,7 @@ func goodHost() *lockdownHost {
 }
 
 func TestCheckLockdown(t *testing.T) {
-	e := BootExpect{Tailscale: true, TailscaleSSH: true, Hardened: true, User: "root", AdminAddress: "100.64.0.2", SSHPort: 22}
+	e := BootExpect{Tailscale: true, TailscaleSSH: true, Hardened: true, Tunnel: true, User: "root", AdminAddress: "100.64.0.2", SSHPort: 22}
 	if p := CheckLockdown(context.Background(), goodHost(), e); len(p) != 0 {
 		t.Fatalf("healthy server reported %q", p)
 	}
@@ -234,6 +243,7 @@ func TestCheckLockdown(t *testing.T) {
 		"tailscale not running": func(h *lockdownHost) { h.tsState = "NeedsLogin" },
 		"tailscale ssh off":     func(h *lockdownHost) { h.tsSSH = "false" },
 		"passwords back on":     func(h *lockdownHost) { h.passwords = "yes" },
+		"tunnel not connected":  func(h *lockdownHost) { h.tunnelDown = true },
 	} {
 		h := goodHost()
 		broken(h)
@@ -262,4 +272,8 @@ func TestBootCheck(t *testing.T) {
 	if msg, err := BootCheck(context.Background(), h); err == nil || !strings.Contains(msg, "PROBLEMS: the firewall rules are not loaded") {
 		t.Fatalf("broken: %v %q", err, msg)
 	}
+}
+
+func before(steps []string, a, b string) bool {
+	return slices.Index(steps, a) >= 0 && slices.Index(steps, a) < slices.Index(steps, b)
 }

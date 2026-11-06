@@ -65,6 +65,9 @@ func (r *Runner) localSteps() []step {
 			}
 			return ""
 		}, run: r.hereHardenSSH},
+		{name: "Cloudflare Tunnel", run: func(ctx context.Context, log func(string)) error {
+			return r.setupTunnel(ctx, r.local, log)
+		}},
 		{name: "Stage the firewall", run: func(ctx context.Context, log func(string)) error {
 			return r.stageFirewallOn(ctx, r.local, log)
 		}},

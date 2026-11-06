@@ -82,6 +82,7 @@ type Result struct {
 	WebPorts        []int
 	RebootNeeded    bool   // the system update needs a reboot to finish
 	RebootChecked   bool   // rebooted, and the lockdown came back on its own
+	Tunnel          bool   // web traffic arrives through a Cloudflare Tunnel
 	RebootScheduled bool   // local run: reboots shortly; the boot check reports
 	TailscaleSSH    string // "on", or why it stayed off; "" when not requested
 }
@@ -169,6 +170,9 @@ func New(o Options) *Runner {
 			}
 			return ""
 		}, run: r.hardenSSH},
+		{name: "Cloudflare Tunnel", run: func(ctx context.Context, log func(string)) error {
+			return r.setupTunnel(ctx, r.admin, log)
+		}},
 		{name: "Stage the firewall", run: r.stageFirewall},
 		{name: "Apply the firewall with a rollback timer", run: r.applyFirewall},
 		{name: "Confirm over the private network", run: r.confirmFirewall},
@@ -590,6 +594,23 @@ func (r *Runner) resumeTailscaleSSH(log func(string)) {
 		return
 	}
 	r.tsSSHPaused = false
+}
+
+// setupTunnel installs cloudflared and connects the tunnel before the
+// firewall changes: with a tunnel no web port is opened at all. A plan
+// without one removes the tunnel an earlier run set up.
+func (r *Runner) setupTunnel(ctx context.Context, host remote.Host, log func(string)) error {
+	if !r.o.Plan.Firewall.CloudflareTunnel {
+		return remote.RemoveTunnel(ctx, host, log)
+	}
+	if err := remote.InstallCloudflared(ctx, host, r.facts, log); err != nil {
+		return err
+	}
+	if err := remote.SetupTunnel(ctx, host, r.o.Plan.Firewall.TunnelToken, log); err != nil {
+		return err
+	}
+	r.result.Tunnel = true
+	return nil
 }
 
 func (r *Runner) skipReboot() string {
