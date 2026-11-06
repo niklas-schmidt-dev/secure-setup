@@ -51,6 +51,21 @@ sh. Knobs: `SECURE_SETUP_NO_RUN=1` installs without starting anything,
 `SECURE_SETUP_VERSION=v0.2.0` pins a release, `SECURE_SETUP_INSTALL_DIR`
 picks another directory.
 
+`checksums.txt` comes from the same release page as the archives, so it
+catches a broken download, not a replaced release. Releases after v0.4.0
+also carry signed build provenance: GitHub attests that the release workflow
+built each archive from the tagged commit. To check an archive without
+trusting the release page, use the GitHub CLI:
+
+```
+gh attestation verify secure-setup_linux_amd64.tar.gz \
+  --repo niklas-schmidt-dev/secure-setup \
+  --signer-workflow niklas-schmidt-dev/secure-setup/.github/workflows/release.yml
+```
+
+Without a GitHub login, add `--bundle provenance.json`, downloaded from the
+same release.
+
 **On the server** (as root, in your first SSH session):
 
 ```
