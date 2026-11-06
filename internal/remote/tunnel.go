@@ -54,6 +54,11 @@ func InstallCloudflared(ctx context.Context, c Host, f *Facts, onLine func(strin
 	var script string
 	switch f.PkgMgr {
 	case "apt-get":
+		// The repository is fetched over HTTPS; curl may be there without
+		// the CA bundle it only recommends.
+		if err := InstallPackages(ctx, c, f, onLine, "ca-certificates"); err != nil {
+			return err
+		}
 		script = `export DEBIAN_FRONTEND=noninteractive
 mkdir -p --mode=0755 /usr/share/keyrings
 curl -fsSL --proto '=https' https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg

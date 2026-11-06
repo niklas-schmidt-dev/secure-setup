@@ -443,8 +443,12 @@ func (h *installHost) Output(_ context.Context, cmd string) (string, error) {
 }
 
 func TestInstallCloudflared(t *testing.T) {
+	h0 := &installHost{}
+	if err := InstallCloudflared(context.Background(), h0, &Facts{PkgMgr: "apt-get"}, func(string) {}); err != nil || !strings.Contains(h0.all(), "https://pkg.cloudflare.com/cloudflared any main") {
+		t.Fatalf("apt repository: %v %s", err, h0.all())
+	}
 	for mgr, want := range map[string]string{
-		"apt-get": "https://pkg.cloudflare.com/cloudflared any main",
+		"apt-get": "--no-install-recommends ca-certificates",
 		"dnf":     "https://pkg.cloudflare.com/cloudflared.repo",
 		"pacman":  "pacman -S --noconfirm --needed cloudflared",
 	} {
