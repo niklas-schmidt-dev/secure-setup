@@ -2,11 +2,19 @@
 
 One command that turns a fresh Linux server into one only you can reach.
 
+Run it on the server:
+
 ```
-secure-setup
+curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh | sh -s -- here
 ```
 
-The guided wizard connects to the server over its public address once, then:
+or on your computer, pointing it at the server:
+
+```
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh)"
+```
+
+Either way the guided wizard:
 
 1. installs Tailscale and joins your tailnet (auth key or login link)
 2. switches SSH to keys only, after installing and verifying your key
@@ -27,19 +35,33 @@ AWS, GCP and so on. Debian, Ubuntu, Fedora, Rocky, Alma, Arch and openSUSE.
 
 ## Install
 
-One command on your Mac or Linux machine (not on the server). It installs the
-tool and starts the wizard:
+The install script downloads the release for your OS and architecture from
+GitHub Releases, checks its SHA-256 against `checksums.txt`, puts one static
+binary in `/usr/local/bin` (as root) or `~/.local/bin`, and runs it with the
+arguments you pass. Read it first if you like: it is about 110 lines of POSIX
+sh. Knobs: `SECURE_SETUP_NO_RUN=1` installs without starting anything,
+`SECURE_SETUP_VERSION=v0.2.0` pins a release, `SECURE_SETUP_INSTALL_DIR`
+picks another directory.
+
+**On the server** (as root, in your first SSH session):
+
+```
+curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh | sh -s -- here
+```
+
+**On your computer**, to set a server up over SSH:
 
 ```
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh)"
 ```
 
-The script downloads the release for your OS and architecture from GitHub
-Releases, checks its SHA-256 against `checksums.txt`, puts one static binary
-in `~/.local/bin`, and runs it. Read it first if you like: it is about 100 lines
-of POSIX sh. Knobs: `SECURE_SETUP_NO_RUN=1` installs without starting the
-wizard, `SECURE_SETUP_VERSION=v0.1.0` pins a release,
-`SECURE_SETUP_INSTALL_DIR` picks another directory.
+**Unattended at first boot**, so the server is never reachable from the
+internet at all: see [examples/cloud-init.yaml](examples/cloud-init.yaml).
+With a Tailscale auth key it is one line of user data:
+
+```
+TS_AUTHKEY=tskey-auth-... sh -c "$(curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh)" -- here --yes
+```
 
 Other ways:
 
@@ -49,20 +71,33 @@ go install github.com/niklas-schmidt-dev/secure-setup@latest   # needs Go 1.27+
 
 or download an archive from the Releases page. Windows: use WSL.
 
-Your machine must be on the same tailnet as the server for the final checks
-(the Tailscale app or `tailscale up`).
+Other ways: `go install github.com/niklas-schmidt-dev/secure-setup@latest`
+(Go 1.27+), or an archive from the Releases page. Windows: use WSL.
 
 ## Use
 
+On the server itself:
+
 ```
-secure-setup                       guided setup (TUI)
-secure-setup apply -f plan.json    replay a saved plan, no questions asked with --yes
-secure-setup render -f plan.json   print the nftables ruleset a plan produces
-secure-setup undo --host ADDR      remove the firewall, timers and sshd change again
+secure-setup here                  guided setup of this machine (TUI)
+secure-setup here --yes            no questions: defaults, confirmed by self-checks
+secure-setup here -f plan.json     run a saved plan on this machine
+secure-setup confirm               in a new tailnet session: confirm a waiting setup
+secure-setup undo --here           remove it from this machine again
 ```
 
-The wizard saves its answers (without secrets) to `~/.config/secure-setup/<host>.json`.
-Replaying that file sets up the next server the same way:
+From your computer:
+
+```
+secure-setup                       guided setup of a server over SSH (TUI)
+secure-setup apply -f plan.json    replay a saved plan, no questions asked with --yes
+secure-setup undo --host ADDR      remove the firewall, timers and sshd change again
+secure-setup render -f plan.json   print the nftables ruleset a plan produces
+```
+
+The wizard saves its answers (without secrets) to
+`~/.config/secure-setup/<host>.json`, or `/etc/secure-setup/plan.json` on the
+server. Replaying that file sets up the next server the same way:
 
 ```
 TS_AUTHKEY=tskey-auth-... secure-setup apply -f ~/.config/secure-setup/vps.json --yes
@@ -70,6 +105,31 @@ TS_AUTHKEY=tskey-auth-... secure-setup apply -f ~/.config/secure-setup/vps.json 
 
 Secrets come from the environment in non-interactive mode:
 `SECURE_SETUP_PASSWORD`, `SECURE_SETUP_PASSPHRASE`, `TS_AUTHKEY`.
+
+### On the server or from your computer?
+
+Both do the same work and both are protected by the rollback timer. They
+differ in who proves that the new rules let you in:
+
+- **From your computer**, secure-setup opens a brand-new SSH connection over
+  the tailnet after the rules go live, and afterwards proves from the outside
+  that the public port is closed. Your key is installed and tested before
+  password login is turned off. The strongest proof, and nothing to type on
+  the server.
+- **On the server** (`here`), it asks you to log in once more from another
+  device over the tailnet while the timer runs. That login is detected (a new
+  session on the tailnet address, the rule's packet counter plus sshd's
+  journal) and confirms the rules; with Tailscale SSH, run
+  `secure-setup confirm` in the new session. Password login is only turned
+  off when a public key is already authorized or Tailscale SSH is on. It
+  cannot test its own public port from inside, so do that once from outside:
+  `nc -zv <public ip> 22` must fail.
+- **Unattended** (`here --yes`, cloud-init), nobody can log in during the
+  run, so it confirms itself: the admin rule is loaded, sshd listens on the
+  tailnet address, Tailscale is running and online, and an online tailnet peer
+  answers a `tailscale ping` through the new rules. What it cannot see is your
+  tailnet ACL. If that blocks SSH to the new node, fix the ACL; the server is
+  intact and the provider console remains the back door.
 
 ## What ends up on the server
 
@@ -80,6 +140,7 @@ Secrets come from the environment in non-interactive mode:
 | `/usr/local/sbin/secure-setup-cloudflare-sync` | refreshes the ranges; run daily by `secure-setup-cloudflare-sync.timer` |
 | `/etc/ssh/sshd_config.d/00-secure-setup.conf` | password login off, root login with keys only |
 | `/var/lib/secure-setup/` | rollback script and the previous ruleset; `rolled-back` appears if a rollback ever fired |
+| `/etc/secure-setup/plan.json` | the answers of a `here` run, for `secure-setup here -f` next time |
 
 ufw or firewalld, when active, are disabled: nftables takes over.
 
@@ -89,7 +150,7 @@ The ruleset in words:
 - loopback, established and related connections, the ICMP types networks need, DHCP replies: accept
 - ping: accept with a rate limit (optional)
 - UDP 41641 from anywhere: accept (direct Tailscale connections; authenticated WireGuard)
-- SSH and any extra ports you chose, only on `tailscale0`: accept
+- SSH and any extra ports you chose, only on `tailscale0`: accept (with a counter: `nft list chain inet secure_setup input` shows how many connections came in this way)
 - TCP 443 (and 80 if chosen), only from Cloudflare's ranges: accept
 - forwarded traffic (Docker, VMs): allowed from inside, allowed from the internet only through Cloudflare on the web ports
 - outbound: allowed
@@ -103,7 +164,9 @@ See it for yourself before applying: `secure-setup render`.
    chosen window (60 s to 5 min).
 3. The rules are loaded atomically.
 4. secure-setup opens a brand-new SSH connection over the tailnet. New, because
-   the old connection would survive anyway as an established flow.
+   the old connection would survive anyway as an established flow. (On the
+   server, it waits for your login from another device instead, or runs the
+   self-checks in unattended mode.)
 5. Over that connection it cancels the timer, persists the ruleset and enables
    the services.
 
@@ -136,26 +199,34 @@ non-zero. The server is in its previous state.
 ## Development
 
 ```
-go test ./...                    unit tests (ruleset generator, parsers, plan)
+go test ./...                    unit tests (ruleset generator, parsers, plan, sessions)
 scripts/validate-ruleset.sh      rulesets and scripts against a real nft binary (Docker)
-test/e2e/run.sh                  full run against a throwaway systemd server (Docker)
+test/e2e/run.sh                  full run from a client container against a throwaway systemd server (Docker)
+test/e2e/run-here.sh             full run of `here` inside that server: login, confirm, self-check, rollback, TUI, undo
 ```
 
-The end-to-end test builds a Debian container with systemd and sshd on two
-networks, lets secure-setup lock it down over the "private" one, then proves
-the public port is closed, forces a lockout to watch the rollback fire, and
-runs `undo`. Docker commands use `DOCKER_CONTEXT` (default `nas-docker`).
-The e2e networks use `10.250.100.0/24` and `10.250.101.0/24`; override with
-`E2E_SUBNET_PUBLIC` and `E2E_SUBNET_PRIVATE`.
+The end-to-end tests build a Debian container with systemd and sshd on two
+networks (a "public" and a "private" one standing in for the tailnet), lock
+it down, prove the public port is closed, force a lockout to watch the
+rollback fire, and run `undo`. Docker commands use `DOCKER_CONTEXT` (default
+`nas-docker`). The e2e networks use `10.250.100.0/24` and `10.250.101.0/24`;
+override with `E2E_SUBNET_PUBLIC` and `E2E_SUBNET_PRIVATE`. Build the images
+first:
+
+```
+docker build -t secure-setup-e2e-server -f test/e2e/Dockerfile.server test/e2e
+docker build -t secure-setup-e2e-client -f test/e2e/Dockerfile.client test/e2e
+```
 
 Layout:
 
 ```
-main.go                 commands: wizard, apply, render, undo
+main.go                 commands: wizard, here, confirm, apply, render, undo
 internal/tui            the wizard (bubbletea + huh)
 internal/textui         plain-text reporter and prompts for apply/undo
-internal/runner         the steps, shared by both UIs
+internal/runner         the steps: over SSH (runner.go) and on the machine itself (here.go)
 internal/remote         what runs on the server, with the embedded scripts and units
+internal/localhost      runs those steps on this machine (`here`)
 internal/sshx           SSH client: keys, agent, password, known_hosts
 internal/nftgen         nftables ruleset template and renderer
 internal/cloudflare     fetches and validates Cloudflare's ranges

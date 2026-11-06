@@ -5,10 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"golang.org/x/crypto/ssh"
-
 	"github.com/niklas-schmidt-dev/secure-setup/internal/nftgen"
-	"github.com/niklas-schmidt-dev/secure-setup/internal/sshx"
 )
 
 // ErrRolledBack means the rollback timer fired before the confirmation.
@@ -37,7 +34,7 @@ type FirewallFiles struct {
 // PrepareFirewall installs nftables, retires ufw/firewalld, stages the new
 // ruleset, validates it and records the current state for rollback. Nothing
 // is applied yet.
-func PrepareFirewall(ctx context.Context, c *sshx.Client, f *Facts, files FirewallFiles, onLine func(string)) error {
+func PrepareFirewall(ctx context.Context, c Host, f *Facts, files FirewallFiles, onLine func(string)) error {
 	var pkgs []string
 	if !f.NFT {
 		pkgs = append(pkgs, "nftables")
@@ -109,7 +106,7 @@ if [ "$(wc -l < %s)" -gt 2 ]; then echo "saved the current secure-setup table fo
 
 // ApplyFirewall arms the rollback timer and loads the staged ruleset. The
 // caller must confirm over a fresh tailnet connection before the timer fires.
-func ApplyFirewall(ctx context.Context, c *sshx.Client, rollbackSeconds int, onLine func(string)) error {
+func ApplyFirewall(ctx context.Context, c Host, rollbackSeconds int, onLine func(string)) error {
 	script := fmt.Sprintf(`
 systemctl stop %[1]s.timer >/dev/null 2>&1 || true
 systemctl stop %[1]s.service >/dev/null 2>&1 || true
@@ -131,9 +128,10 @@ echo "new firewall rules are live"
 	return nil
 }
 
-// ConfirmFirewall must run over a connection opened after ApplyFirewall. It
-// cancels the rollback, persists the ruleset and enables the services.
-func ConfirmFirewall(ctx context.Context, c *sshx.Client, f *Facts, cloudflareSync bool, onLine func(string)) error {
+// ConfirmFirewall cancels the rollback, persists the ruleset and enables the
+// services. Over SSH it must run on a connection opened after ApplyFirewall;
+// locally the caller proves reachability first (see Sessions).
+func ConfirmFirewall(ctx context.Context, c Host, f *Facts, cloudflareSync bool, onLine func(string)) error {
 	rhelInclude := ""
 	if f.Family() == "rhel" {
 		rhelInclude = `touch /etc/sysconfig/nftables.conf
@@ -162,8 +160,7 @@ install -m 0644 %[6]s %[4]s
 echo "ruleset persisted in %[4]s; nftables.service enabled at boot"
 %[8]s`, RolledBackMarker, RollbackUnit, nftgen.TableName, nftgen.ConfigPath, nftgen.Marker, PendingPath, rhelInclude, sync)
 	if err := c.Script(ctx, script, onLine); err != nil {
-		var exit *ssh.ExitError
-		if errors.As(err, &exit) && exit.ExitStatus() == 2 {
+		if exitStatus(err) == 2 {
 			return ErrRolledBack
 		}
 		return fmt.Errorf("confirm firewall: %w", err)

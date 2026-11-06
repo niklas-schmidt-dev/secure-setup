@@ -1,8 +1,17 @@
 #!/bin/sh
-# Installs secure-setup on this machine (your Mac or Linux workstation, not
-# the server) and starts the guided wizard.
+# Installs secure-setup and starts it.
 #
-#   sh -c "$(curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh)"
+#   On your computer, to set a server up over SSH:
+#     sh -c "$(curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh)"
+#
+#   On the server itself (root), to lock this machine down:
+#     curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh | sh -s -- here
+#
+#   Unattended, e.g. in cloud-init, with a Tailscale auth key:
+#     TS_AUTHKEY=tskey-auth-... sh -c "$(curl -fsSL .../install.sh)" -- here --yes
+#
+# Arguments after the script are passed to secure-setup. Without arguments
+# the wizard for a remote server starts.
 #
 # What it does: downloads the release archive for your OS and architecture
 # from GitHub Releases together with checksums.txt, verifies the SHA-256,
@@ -10,8 +19,8 @@
 #
 # Environment:
 #   SECURE_SETUP_VERSION      release tag to install, e.g. v0.1.0 (default: latest)
-#   SECURE_SETUP_INSTALL_DIR  where the binary goes (default: ~/.local/bin)
-#   SECURE_SETUP_NO_RUN=1     install only, do not start the wizard
+#   SECURE_SETUP_INSTALL_DIR  where the binary goes (default: /usr/local/bin as root, else ~/.local/bin)
+#   SECURE_SETUP_NO_RUN=1     install only, do not start it
 set -eu
 
 REPO="niklas-schmidt-dev/secure-setup"
@@ -58,7 +67,13 @@ main() {
     base="https://github.com/$REPO/releases/download/$version"
   fi
   archive="${NAME}_${os}_${arch}.tar.gz"
-  install_dir=${SECURE_SETUP_INSTALL_DIR:-"$HOME/.local/bin"}
+  if [ -n "${SECURE_SETUP_INSTALL_DIR:-}" ]; then
+    install_dir=$SECURE_SETUP_INSTALL_DIR
+  elif [ "$(id -u)" = 0 ]; then
+    install_dir=/usr/local/bin
+  else
+    install_dir=$HOME/.local/bin
+  fi
 
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
@@ -94,10 +109,13 @@ main() {
 
   say ""
   if [ -t 0 ]; then
-    exec "$bin"
+    exec "$bin" "$@"
   elif ( : </dev/tty ) 2>/dev/null; then
-    # Piped through sh: hand the wizard the terminal.
-    exec "$bin" </dev/tty
+    # Piped through sh: hand secure-setup the terminal.
+    exec "$bin" "$@" </dev/tty
+  elif [ $# -gt 0 ]; then
+    # No terminal (cloud-init, a script): run the given command as is.
+    exec "$bin" "$@"
   else
     say "No terminal available. Start the wizard with: $bin"
   fi

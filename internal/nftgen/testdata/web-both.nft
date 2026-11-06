@@ -41,8 +41,8 @@ table inet secure_setup {
 		# Tailscale: direct WireGuard connections (authenticated; relays are used otherwise)
 		udp dport 41641 accept
 
-		# Administration: only over the tailnet
-		iifname "tailscale0" tcp dport { 22, 8080 } accept
+		# Administration: only over the tailnet (the counter shows new connections through this rule)
+		iifname "tailscale0" tcp dport { 22, 8080 } counter accept
 
 		# Web: only Cloudflare's edge may reach the origin
 		ip saddr @cloudflare_v4 tcp dport { 80, 443 } accept

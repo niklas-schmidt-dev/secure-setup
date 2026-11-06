@@ -63,7 +63,7 @@ func TestRenderContents(t *testing.T) {
 	}
 	for _, want := range []string{
 		"policy drop",
-		`iifname "tailscale0" tcp dport { 22, 8080 } accept`,
+		`iifname "tailscale0" tcp dport { 22, 8080 } counter accept`,
 		"ip saddr @cloudflare_v4 tcp dport { 443 } accept",
 		"ip6 saddr @cloudflare_v6 tcp dport { 443 } accept",
 		`iifname != "eth0" accept`,

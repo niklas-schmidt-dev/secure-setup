@@ -13,6 +13,9 @@ import (
 	"strings"
 	"syscall"
 
+	"golang.org/x/term"
+
+	"github.com/niklas-schmidt-dev/secure-setup/internal/localhost"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/nftgen"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/plan"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/runner"
@@ -42,6 +45,10 @@ func run(ctx context.Context, args []string) error {
 		return tui.Run(ctx, &p, version)
 	}
 	switch args[0] {
+	case "here":
+		return cmdHere(ctx, args[1:])
+	case "confirm":
+		return cmdConfirm(ctx)
 	case "apply":
 		return cmdApply(ctx, args[1:])
 	case "render":
@@ -62,14 +69,122 @@ func run(ctx context.Context, args []string) error {
 func usage() {
 	fmt.Print(`secure-setup ` + version + `
 
-  secure-setup                      guided setup (TUI)
+From your computer:
+  secure-setup                      guided setup of a server over SSH (TUI)
   secure-setup apply -f plan.json   run a saved plan without the wizard
-  secure-setup render -f plan.json  print the nftables ruleset a plan produces
   secure-setup undo --host ADDR     remove the firewall, timers and sshd change again
+
+On the server itself:
+  secure-setup here                 guided setup of this machine (TUI)
+  secure-setup here --yes           no questions: defaults, confirmed by self-checks
+  secure-setup here -f plan.json    run a saved plan on this machine
+  secure-setup confirm              in a new tailnet session: confirm a waiting setup
+  secure-setup undo --here          remove it from this machine again
+
+  secure-setup render -f plan.json  print the nftables ruleset a plan produces
 
 Secrets are read from the environment in non-interactive mode:
   SECURE_SETUP_PASSWORD, SECURE_SETUP_PASSPHRASE, TS_AUTHKEY
 `)
+}
+
+func cmdHere(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("here", flag.ContinueOnError)
+	file := fs.String("f", "", "plan file (JSON) to apply on this machine")
+	yes := fs.Bool("yes", false, "do not ask anything: plan defaults, confirmation by self-checks")
+	confirm := fs.String("confirm", "", "how the new rules are confirmed: login (a new SSH session over the tailnet) or self (checks only, for unattended runs)")
+	noTUI := fs.Bool("no-tui", false, "plain text instead of the wizard")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	host, err := localhost.New(ctx)
+	if err != nil {
+		return err
+	}
+	p := plan.Default()
+	if *file != "" {
+		if p, err = plan.Load(*file); err != nil {
+			return err
+		}
+	}
+	p.Local = true
+	p.Server.User = localhost.LoginUser()
+	p.Tailscale.AuthKey = os.Getenv("TS_AUTHKEY")
+	interactive := term.IsTerminal(int(os.Stdin.Fd())) && !*yes
+	switch {
+	case *confirm != "":
+		p.Firewall.ConfirmBy = *confirm
+	case p.Firewall.ConfirmBy != "":
+	case interactive:
+		p.Firewall.ConfirmBy = plan.ConfirmLogin
+	default:
+		p.Firewall.ConfirmBy = plan.ConfirmSelf
+	}
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	if interactive && !*noTUI {
+		return tui.RunHere(ctx, &p, version, host)
+	}
+	return runHereText(ctx, &p, host, *yes || !interactive)
+}
+
+func runHereText(ctx context.Context, p *plan.Plan, host *localhost.Host, yes bool) error {
+	prompt := textui.Prompter{AssumeYes: yes}
+	fmt.Printf("secure-setup %s: locking this machine down\n", version)
+	if !yes {
+		ok, err := prompt.Confirm(ctx, "Continue?", describe(p))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("not confirmed")
+		}
+	} else {
+		fmt.Print(describe(p))
+	}
+	opts := runner.Options{Plan: p, Prompt: prompt, Local: host}
+	opts.Report = textui.Reporter(os.Stdout, runner.New(opts).Steps())
+	res, err := runner.New(opts).Run(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Println()
+	fmt.Println("This machine is locked down.")
+	fmt.Println()
+	fmt.Print(tui.Summary(p, res))
+	return nil
+}
+
+// cmdConfirm runs in a fresh SSH session on the server while `here` waits
+// for a login. It checks that the session arrived over the private address.
+func cmdConfirm(ctx context.Context) error {
+	host, err := localhost.New(ctx)
+	if err != nil {
+		return err
+	}
+	expect, err := host.Output(ctx, "cat "+runner.ConfirmExpectPath+" 2>/dev/null || true")
+	if err != nil {
+		return err
+	}
+	if expect == "" {
+		return errors.New("nothing to confirm: no `secure-setup here` run is waiting on this machine")
+	}
+	client, server := localhost.SSHSession()
+	if !server.IsValid() {
+		if os.Getenv("SUDO_USER") != "" {
+			return errors.New("sudo dropped SSH_CONNECTION; run it as: sudo --preserve-env=SSH_CONNECTION secure-setup confirm")
+		}
+		return errors.New("this is not an SSH session; run `secure-setup confirm` in a new SSH login over the tailnet")
+	}
+	if server.String() != expect {
+		return fmt.Errorf("this session came in over %s, not %s; log in over the tailnet address and run it there", server, expect)
+	}
+	if err := host.WriteFile(ctx, runner.ConfirmedPath, []byte(client.String()+"\n"), "0600"); err != nil {
+		return err
+	}
+	fmt.Printf("confirmed: this session arrived over %s from %s; the setup keeps the new rules\n", server, client)
+	return nil
 }
 
 func cmdApply(ctx context.Context, args []string) error {
@@ -89,6 +204,17 @@ func cmdApply(ctx context.Context, args []string) error {
 	p.Server.Password = os.Getenv("SECURE_SETUP_PASSWORD")
 	p.Server.Passphrase = os.Getenv("SECURE_SETUP_PASSPHRASE")
 	p.Tailscale.AuthKey = os.Getenv("TS_AUTHKEY")
+	if p.Local {
+		host, err := localhost.New(ctx)
+		if err != nil {
+			return err
+		}
+		p.Server.User = localhost.LoginUser()
+		if p.Firewall.ConfirmBy == "" {
+			p.Firewall.ConfirmBy = plan.ConfirmSelf
+		}
+		return runHereText(ctx, &p, host, *yes)
+	}
 
 	prompt := textui.Prompter{AssumeYes: *yes}
 	fmt.Printf("secure-setup %s: applying %s to %s\n", version, *file, p.Address())
@@ -117,7 +243,11 @@ func cmdApply(ctx context.Context, args []string) error {
 
 func describe(p *plan.Plan) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "  server          %s as %s\n", p.Address(), p.Server.User)
+	if p.Local {
+		fmt.Fprintf(&b, "  server          this machine\n")
+	} else {
+		fmt.Fprintf(&b, "  server          %s as %s\n", p.Address(), p.Server.User)
+	}
 	if p.Tailscale.UseExisting {
 		fmt.Fprintf(&b, "  admin network   existing, %s on %s\n", p.Tailscale.AdminAddress, p.Tailscale.AdminInterface)
 	} else {
@@ -128,6 +258,9 @@ func describe(p *plan.Plan) string {
 	fmt.Fprintf(&b, "  ping            %v\n", p.Firewall.AllowPing)
 	fmt.Fprintf(&b, "  sshd keys only  %v\n", p.SSH.Harden)
 	fmt.Fprintf(&b, "  rollback        %ds\n", p.Firewall.RollbackSeconds)
+	if p.Local {
+		fmt.Fprintf(&b, "  confirmation    %s\n", map[string]string{plan.ConfirmLogin: "a new login over the tailnet", plan.ConfirmSelf: "self-checks (unattended)"}[p.Firewall.ConfirmBy])
+	}
 	return b.String()
 }
 
@@ -200,6 +333,7 @@ echo "undo complete; Tailscale was left installed"
 func cmdUndo(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("undo", flag.ContinueOnError)
 	host := fs.String("host", "", "address to connect to (tailnet IP or name)")
+	here := fs.Bool("here", false, "undo on this machine instead of over SSH")
 	port := fs.Int("port", 22, "SSH port")
 	user := fs.String("user", "root", "SSH user")
 	key := fs.String("key", "", "private key file (default: ssh-agent and ~/.ssh keys)")
@@ -207,18 +341,29 @@ func cmdUndo(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *host == "" {
-		return errors.New("undo needs --host")
+	if *host == "" && !*here {
+		return errors.New("undo needs --host ADDR, or --here on the server itself")
+	}
+	where := *host
+	if *here {
+		where = "this machine"
 	}
 	prompt := textui.Prompter{AssumeYes: *yes}
 	if !*yes {
-		ok, err := prompt.Confirm(ctx, "Remove the secure-setup firewall, timers and sshd change on "+*host+"?", "The server becomes reachable from the whole internet again.")
+		ok, err := prompt.Confirm(ctx, "Remove the secure-setup firewall, timers and sshd change on "+where+"?", "The server becomes reachable from the whole internet again.")
 		if err != nil {
 			return err
 		}
 		if !ok {
 			return errors.New("not confirmed")
 		}
+	}
+	if *here {
+		h, err := localhost.New(ctx)
+		if err != nil {
+			return err
+		}
+		return h.Script(ctx, undoScript, func(line string) { fmt.Println("   ", line) })
 	}
 	auth := sshx.Auth{User: *user, KeyPath: *key, Password: os.Getenv("SECURE_SETUP_PASSWORD"), Passphrase: os.Getenv("SECURE_SETUP_PASSPHRASE")}
 	c, err := sshx.Dial(ctx, fmt.Sprintf("%s:%d", *host, *port), auth, sshx.HostKeyPolicy{Prompter: prompt})

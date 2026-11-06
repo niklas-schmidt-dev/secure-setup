@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/niklas-schmidt-dev/secure-setup/internal/cloudflare"
+	"github.com/niklas-schmidt-dev/secure-setup/internal/localhost"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/nftgen"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/plan"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/remote"
@@ -55,17 +56,24 @@ type Options struct {
 	// LocalTailscaleReady reports whether this machine is on the tailnet.
 	// Nil uses the local tailscale CLI.
 	LocalTailscaleReady func(ctx context.Context) (bool, string)
+	// Local runs the plan on this machine (`secure-setup here`) instead of
+	// over SSH. Plan.Local must be set too.
+	Local *localhost.Host
 }
 
 // Result is what a successful run learned.
 type Result struct {
+	Local           bool
 	Facts           *remote.Facts
 	AdminAddress    string // tailnet IP (or the existing private address)
 	DNSName         string // MagicDNS name, when known
 	SSHPort         int
+	PublicAddress   string // the server's internet address, when known
 	PublicSSHClosed bool
 	PublicSSHNote   string
+	ConfirmedBy     string // local runs: "login from <peer>" or the self-check summary
 	Hardened        bool
+	HardenNote      string // why hardening was skipped, if it was
 	WebPorts        []int
 }
 
@@ -79,6 +87,12 @@ type Runner struct {
 	admin   *sshx.Client
 	hostKey ssh.PublicKey
 	result  Result
+
+	// local mode
+	local      *localhost.Host
+	before     []remote.Session // sshd sessions before the firewall was applied
+	applyEpoch int64            // server clock when the rules went live
+	tsState    *remote.TSStatus
 }
 
 type step struct {
@@ -96,6 +110,12 @@ func New(o Options) *Runner {
 		o.LocalTailscaleReady = LocalTailscaleReady
 	}
 	r := &Runner{o: o}
+	if o.Local != nil {
+		r.local = o.Local
+		r.result.Local = true
+		r.steps = r.localSteps()
+		return r
+	}
 	p := o.Plan
 	ts := &p.Tailscale
 	r.steps = []step{
@@ -144,7 +164,7 @@ func (r *Runner) Steps() []string {
 
 // Run executes every step. The returned error belongs to the step that failed.
 func (r *Runner) Run(ctx context.Context) (*Result, error) {
-	defer r.pub.Close()
+	defer func() { r.pub.Close() }()
 	defer func() { r.admin.Close() }()
 	for i, s := range r.steps {
 		if s.skip != nil {
@@ -247,6 +267,7 @@ func (r *Runner) connect(ctx context.Context, log func(string)) error {
 		log("tailscale installed, state: " + orUnknown(f.TailscaleState))
 	}
 	r.result.SSHPort = f.SSHPort
+	r.result.PublicAddress = p.Server.Host
 	if !containsInt(p.Firewall.TailnetPorts, f.SSHPort) {
 		p.Firewall.TailnetPorts = append(p.Firewall.TailnetPorts, f.SSHPort)
 		log(fmt.Sprintf("added sshd port %d to the tailnet ports", f.SSHPort))
@@ -296,23 +317,32 @@ func (r *Runner) ensureAuthorizedKey(ctx context.Context, log func(string)) erro
 }
 
 func (r *Runner) installTailscale(ctx context.Context, log func(string)) error {
-	return remote.InstallTailscale(ctx, r.pub, r.facts, log)
+	return remote.InstallTailscale(ctx, r.server(), r.facts, log)
+}
+
+// server is the host the server-side steps before the firewall run on.
+func (r *Runner) server() remote.Host {
+	if r.local != nil {
+		return r.local
+	}
+	return r.pub
 }
 
 func (r *Runner) joinTailnet(ctx context.Context, log func(string)) error {
 	p := r.o.Plan
+	host := r.server()
 	key := p.Tailscale.AuthKey
 	if key == "" {
 		log("no auth key given: tailscale will print a login link")
 	}
-	err := remote.TailscaleUp(ctx, r.pub, remote.UpOptions{AuthKey: key, Hostname: p.Tailscale.Hostname, SSH: p.Tailscale.SSH}, log,
+	err := remote.TailscaleUp(ctx, host, remote.UpOptions{AuthKey: key, Hostname: p.Tailscale.Hostname, SSH: p.Tailscale.SSH}, log,
 		func(url string) {
 			r.attention(2, "Open this link in your browser to add the server to your tailnet:\n"+url)
 		})
 	if err != nil {
 		return err
 	}
-	st, err := remote.TailscaleStatus(ctx, r.pub)
+	st, err := remote.TailscaleStatus(ctx, host)
 	if err != nil {
 		return err
 	}
@@ -445,6 +475,10 @@ func (r *Runner) hardenSSH(ctx context.Context, log func(string)) error {
 }
 
 func (r *Runner) stageFirewall(ctx context.Context, log func(string)) error {
+	return r.stageFirewallOn(ctx, r.admin, log)
+}
+
+func (r *Runner) stageFirewallOn(ctx context.Context, host remote.Host, log func(string)) error {
 	p := r.o.Plan
 	elements := nftgen.RenderElements(nil, nil)
 	if len(p.Firewall.WebPorts) > 0 {
@@ -469,7 +503,7 @@ func (r *Runner) stageFirewall(ctx context.Context, log func(string)) error {
 		return err
 	}
 	r.result.WebPorts = p.Firewall.WebPorts
-	return remote.PrepareFirewall(ctx, r.admin, r.facts, remote.FirewallFiles{
+	return remote.PrepareFirewall(ctx, host, r.facts, remote.FirewallFiles{
 		Ruleset:        ruleset,
 		Elements:       elements,
 		CloudflareSync: p.Firewall.CloudflareSync && len(p.Firewall.WebPorts) > 0,
@@ -477,9 +511,13 @@ func (r *Runner) stageFirewall(ctx context.Context, log func(string)) error {
 }
 
 func (r *Runner) applyFirewall(ctx context.Context, log func(string)) error {
+	return r.applyFirewallOn(ctx, r.admin, log)
+}
+
+func (r *Runner) applyFirewallOn(ctx context.Context, host remote.Host, log func(string)) error {
 	secs := r.o.Plan.Firewall.RollbackSeconds
 	log(fmt.Sprintf("if the next step cannot confirm within %ds, the server restores its previous firewall by itself", secs))
-	return remote.ApplyFirewall(ctx, r.admin, secs, log)
+	return remote.ApplyFirewall(ctx, host, secs, log)
 }
 
 func (r *Runner) confirmFirewall(ctx context.Context, log func(string)) error {
@@ -508,7 +546,7 @@ func (r *Runner) confirmFirewall(ctx context.Context, log func(string)) error {
 }
 
 // rollbackMarker returns the UTC time of a fired rollback, or "".
-func (r *Runner) rollbackMarker(ctx context.Context, c *sshx.Client) string {
+func (r *Runner) rollbackMarker(ctx context.Context, c remote.Host) string {
 	out, err := c.Output(ctx, "cat "+remote.RolledBackMarker+" 2>/dev/null || true")
 	if err != nil {
 		return ""

@@ -12,14 +12,16 @@ for anything that could lock people out of their servers or let others in.
 
 ## What the tool does, and does not do
 
-On your machine it is a single static binary. It makes outbound connections to:
+It is a single static binary, run either on your machine or on the server
+(`secure-setup here`). It makes outbound connections to:
 
-- the server you name, over SSH
+- the server you name, over SSH (when run from your machine)
 - `www.cloudflare.com`, to fetch the published IP ranges
-- `api.github.com` and `github.com`, only through `install.sh`, to download a release
+- `github.com`, only through `install.sh`, to download a release
 
-It sends no telemetry and writes only `~/.config/secure-setup/<host>.json`
-(the plan, never secrets) and `~/.ssh/known_hosts` (after you accepted a host key).
+It sends no telemetry and writes only the plan (never secrets) to
+`~/.config/secure-setup/<host>.json` or `/etc/secure-setup/plan.json`, and
+`~/.ssh/known_hosts` after you accepted a host key.
 
 On the server it installs `nftables` and, unless you chose an existing private
 network, Tailscale through `https://tailscale.com/install.sh`. Every file it
@@ -30,9 +32,17 @@ installed on `undo`.
 ## Lockout protection
 
 Firewall rules are applied under a transient systemd timer that restores the
-previous ruleset if secure-setup cannot confirm the new one over a brand-new
-tailnet connection within your chosen window. `test/e2e/run.sh` exercises
-this path by forcing a lockout and checking that the server comes back.
+previous ruleset if secure-setup cannot confirm the new one within your chosen
+window. From your machine the confirmation is a brand-new SSH connection over
+the tailnet. On the server it is a new login from another device, detected as
+a new session on the tailnet address or as a hit on the admin rule's packet
+counter together with an "Accepted" line in sshd's journal; `secure-setup
+confirm` in that session is the explicit form. In unattended mode (`here
+--yes`) it is a self-check: admin rule loaded, sshd listening on the tailnet
+address, Tailscale running and online, a tailnet peer answering a ping
+through the new rules. Self-checks cannot see your tailnet ACL.
+`test/e2e/run.sh` and `test/e2e/run-here.sh` exercise all of these paths,
+including forced lockouts, and check that the server comes back.
 
 ## Threat model, in short
 
