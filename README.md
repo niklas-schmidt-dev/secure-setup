@@ -185,7 +185,7 @@ The ruleset in words:
 - UDP 41641 from anywhere: accept (direct Tailscale connections; authenticated WireGuard)
 - SSH and any extra ports you chose, only on `tailscale0`: accept (with a counter: `nft list chain inet secure_setup input` shows how many connections came in this way)
 - TCP 443 (and 80 if chosen), only from Cloudflare's ranges: accept
-- forwarded traffic (Docker, VMs): allowed from inside, allowed from the internet only through Cloudflare on the web ports. "The internet" is every interface with a default route, IPv4 or IPv6; traffic arriving on another interface, such as a second public NIC without a default route, counts as inside
+- forwarded traffic (Docker, VMs): allowed from inside, allowed from the internet only through Cloudflare on the web ports. "The internet" is every interface with a default route, IPv4 or IPv6, and every network card with a public address, such as a second public NIC without a default route; traffic arriving on anything else (Docker and VM bridges, VPN and tunnel devices, private networks) counts as inside
 - outbound: allowed
 
 See it for yourself before applying: `secure-setup render`.

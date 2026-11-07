@@ -102,16 +102,19 @@ func TestResolveWAN(t *testing.T) {
 	}
 }
 
-// Other default-route devices join the internet set; the primary uplink and
-// the admin interface do not.
+// Other default-route devices and public network cards join the internet
+// set, each once; the primary uplink and the admin interface do not.
 func TestExtraWAN(t *testing.T) {
 	p := plan.Default()
 	p.Firewall.WANInterface = "eth0"
 	p.Tailscale.AdminInterface = "eth1"
-	r := &Runner{o: Options{Plan: &p}, facts: &remote.Facts{WANIfaces: []string{"eth0", "he-ipv6", "eth1", "ens4"}}}
+	r := &Runner{o: Options{Plan: &p}, facts: &remote.Facts{
+		WANIfaces:  []string{"eth0", "he-ipv6", "eth1", "ens4"},
+		PublicNICs: []string{"eth0", "ens5", "ens4", "eth1"},
+	}}
 	var logs []string
 	got := r.extraWAN(func(l string) { logs = append(logs, l) })
-	if !slices.Equal(got, []string{"he-ipv6", "ens4"}) {
+	if !slices.Equal(got, []string{"he-ipv6", "ens4", "ens5"}) {
 		t.Fatalf("extraWAN = %q", got)
 	}
 	if len(logs) != 2 || !strings.Contains(logs[0], "eth1") {

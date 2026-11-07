@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -757,16 +758,21 @@ func (r *Runner) stageFirewall(ctx context.Context, log func(string)) error {
 	return r.stageFirewallOn(ctx, r.admin, log)
 }
 
-// extraWAN lists the other devices with a default route (an IPv6 uplink, a
-// second provider link): forwarded traffic from them is treated like the
-// internet, not like an internal bridge.
+// extraWAN lists the other internet-facing devices: those with a default
+// route (an IPv6 uplink, a second provider link) and network cards with a
+// public address but no default route. Forwarded traffic from them is
+// treated like the internet, not like an internal bridge.
 func (r *Runner) extraWAN(log func(string)) []string {
-	var out []string
-	for _, n := range r.facts.WANIfaces {
+	var seen, out []string
+	for _, n := range append(slices.Clone(r.facts.WANIfaces), r.facts.PublicNICs...) {
+		if slices.Contains(seen, n) {
+			continue
+		}
+		seen = append(seen, n)
 		switch n {
 		case r.o.Plan.Firewall.WANInterface:
 		case r.o.Plan.Tailscale.AdminInterface:
-			log("the admin interface " + n + " also has a default route; it stays trusted for forwarding")
+			log("the admin interface " + n + " also faces the internet; it stays trusted for forwarding")
 		default:
 			out = append(out, n)
 		}
