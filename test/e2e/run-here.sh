@@ -93,7 +93,9 @@ echo "   rules live, public ssh blocked; logging in over the private network"
 login "$prvip" "echo hello-from-client" | grep -q hello-from-client || fail "private login failed"
 wait_log /root/run1.log "EXIT=" 60
 d exec "$srv" grep -Eq "new SSH session from .* through the eth1 rule: the rules let you in|sshd accepted a login by root from $cliprv after the rules went live" /root/run1.log || { d exec "$srv" tail -30 /root/run1.log; fail "login not detected"; }
-d exec "$srv" grep -q "a connection arrived over eth1 through the new rule" /root/run1.log || fail "rule counter did not register the login"
+# Both lines need the eth1 rule's counter above zero; which one appears depends
+# on whether a poll still saw the short session open.
+d exec "$srv" grep -Eq "a connection arrived over eth1 through the new rule|new SSH session from .* through the eth1 rule" /root/run1.log || { d exec "$srv" tail -30 /root/run1.log; fail "rule counter did not register the login"; }
 d exec "$srv" grep -q "This machine is locked down" /root/run1.log || { d exec "$srv" tail -30 /root/run1.log; fail "run 1 did not report success"; }
 d exec "$srv" grep -q "EXIT=0" /root/run1.log || fail "run 1 should exit 0"
 
