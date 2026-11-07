@@ -46,10 +46,28 @@ AWS, GCP and so on. Debian, Ubuntu, Fedora, Rocky, Alma, Arch and openSUSE.
 The install script downloads the release for your OS and architecture from
 GitHub Releases, checks its SHA-256 against `checksums.txt`, puts one static
 binary in `/usr/local/bin` (as root) or `~/.local/bin`, and runs it with the
-arguments you pass. Read it first if you like: it is about 110 lines of POSIX
+arguments you pass. Read it first if you like: it is about 150 lines of POSIX
 sh. Knobs: `SECURE_SETUP_NO_RUN=1` installs without starting anything,
 `SECURE_SETUP_VERSION=v0.2.0` pins a release, `SECURE_SETUP_INSTALL_DIR`
 picks another directory.
+
+`checksums.txt` comes from the same release page as the archives, so it
+catches a broken download, not a replaced release. Releases after v0.4.0
+also carry signed build provenance: GitHub attests that the release workflow
+built each archive from the tagged commit. When the GitHub CLI (`gh`) is
+installed, the install script checks it and stops if the provenance is
+missing or does not match; `SECURE_SETUP_NO_PROVENANCE=1` skips that, for
+example to install v0.4.0 or older. Without `gh` it says the check did not
+run. To check an archive yourself:
+
+```
+gh attestation verify secure-setup_linux_amd64.tar.gz \
+  --repo niklas-schmidt-dev/secure-setup \
+  --signer-workflow niklas-schmidt-dev/secure-setup/.github/workflows/release.yml
+```
+
+Without a GitHub login, add `--bundle provenance.json`, downloaded from the
+same release.
 
 **On the server** (as root, in your first SSH session):
 

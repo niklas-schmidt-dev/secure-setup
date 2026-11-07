@@ -35,12 +35,14 @@ checksum:
   name_template: checksums.txt
   algorithm: sha256
 
+# GitHub's generated notes: one line per merged pull request.
 changelog:
-  use: github
-  sort: asc
+  use: github-native
 
 release:
   github:
     owner: niklas-schmidt-dev
     name: secure-setup
   prerelease: auto
+  # The release workflow publishes it once the provenance is attached.
+  draft: true

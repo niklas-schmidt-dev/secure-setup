@@ -69,6 +69,14 @@ including forced lockouts, and check that the server comes back.
   cloudflared as a file, never on a command line.
 - UDP 41641 is open to the world for direct Tailscale connections. That port
   only speaks authenticated WireGuard.
+- Releases are built by GitHub Actions from the tagged commit. In releases
+  after v0.4.0, every archive carries a signed build provenance attestation
+  (Sigstore, keyless), also attached to the release as `provenance.json`.
+  `install.sh` checks the SHA-256 from `checksums.txt`, which only catches a
+  broken download, and, when the GitHub CLI is installed, the provenance,
+  which also catches a replaced release. Without `gh` (usually on a fresh
+  server) only the checksum is checked; `gh attestation verify` (see the
+  README) can be run anywhere.
 - Your existing SSH session survives the firewall change (conntrack). That is
   by design and does not weaken the result; the final step proves a fresh
   connection to the public port is blocked.
