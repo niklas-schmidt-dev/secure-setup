@@ -73,8 +73,10 @@ including forced lockouts, and check that the server comes back.
   after v0.4.0, every archive carries a signed build provenance attestation
   (Sigstore, keyless), also attached to the release as `provenance.json`.
   `install.sh` checks the SHA-256 from `checksums.txt`, which only catches a
-  broken download; `gh attestation verify` (see the README) also catches a
-  replaced release.
+  broken download, and, when the GitHub CLI is installed, the provenance,
+  which also catches a replaced release. Without `gh` (usually on a fresh
+  server) only the checksum is checked; `gh attestation verify` (see the
+  README) can be run anywhere.
 - Your existing SSH session survives the firewall change (conntrack). That is
   by design and does not weaken the result; the final step proves a fresh
   connection to the public port is blocked.

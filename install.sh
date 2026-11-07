@@ -16,11 +16,14 @@
 # What it does: downloads the release archive for your OS and architecture
 # from GitHub Releases together with checksums.txt, verifies the SHA-256,
 # installs one static binary, and runs it. Nothing else touches your machine.
+# With the GitHub CLI (gh) installed it also checks the release's signed
+# build provenance: the release workflow built this archive from a tag.
 #
 # Environment:
-#   SECURE_SETUP_VERSION      release tag to install, e.g. v0.1.0 (default: latest)
-#   SECURE_SETUP_INSTALL_DIR  where the binary goes (default: /usr/local/bin as root, else ~/.local/bin)
-#   SECURE_SETUP_NO_RUN=1     install only, do not start it
+#   SECURE_SETUP_VERSION        release tag to install, e.g. v0.1.0 (default: latest)
+#   SECURE_SETUP_INSTALL_DIR    where the binary goes (default: /usr/local/bin as root, else ~/.local/bin)
+#   SECURE_SETUP_NO_RUN=1       install only, do not start it
+#   SECURE_SETUP_NO_PROVENANCE=1  skip the provenance check (releases up to v0.4.0 have none)
 set -eu
 
 REPO="niklas-schmidt-dev/secure-setup"
@@ -28,6 +31,31 @@ NAME="secure-setup"
 
 say() { printf '%s\n' "$*" >&2; }
 die() { say "error: $*"; exit 1; }
+
+# check_provenance verifies provenance.json from the same release with gh.
+# checksums.txt only catches a broken download; the provenance is signed by
+# the release workflow, so a replaced archive or a missing file stops here.
+check_provenance() {
+  [ "${SECURE_SETUP_NO_PROVENANCE:-0}" = 1 ] && return 0
+  if ! command -v gh >/dev/null 2>&1; then
+    say "Provenance not checked (that needs the GitHub CLI, gh)."
+    return 0
+  fi
+  if ! gh attestation verify --help 2>/dev/null | grep -q -- --signer-workflow; then
+    say "Provenance not checked: this gh is too old for \`gh attestation verify\`."
+    return 0
+  fi
+  fetch "$base/provenance.json" "$tmp/provenance.json" ||
+    die "this release has no provenance.json, so its origin cannot be checked
+  (releases up to v0.4.0 have none; SECURE_SETUP_NO_PROVENANCE=1 installs without the check)"
+  if ! gh attestation verify "$tmp/$archive" --repo "$REPO" \
+    --signer-workflow "$REPO/.github/workflows/release.yml" \
+    --bundle "$tmp/provenance.json" >/dev/null 2>"$tmp/provenance.err"; then
+    die "the provenance check failed for $archive: it was not built by the release workflow of $REPO
+$(tail -n 3 "$tmp/provenance.err")"
+  fi
+  say "Provenance OK: built by the release workflow of $REPO."
+}
 
 main() {
   os=$(uname -s)
@@ -91,6 +119,7 @@ main() {
   got      $actual"
   fi
   say "Checksum OK."
+  check_provenance
 
   tar -xzf "$tmp/$archive" -C "$tmp" "$NAME"
   mkdir -p "$install_dir"
