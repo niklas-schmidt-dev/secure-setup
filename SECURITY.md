@@ -27,10 +27,10 @@ different, revoked or certificate key, or a known_hosts file that cannot be
 parsed, is refused before any credential is sent.
 
 On the server it installs `nftables` and, unless you chose an existing private
-network, Tailscale through `https://tailscale.com/install.sh`. Every file it
-writes is listed in the README under "What ends up on the server". It never
-removes your SSH keys, never changes your password, and leaves Tailscale
-installed on `undo`.
+network, Tailscale through `https://tailscale.com/install.sh`. The
+[server file and service inventory](docs/reference.md#what-ends-up-on-the-server)
+lists the configuration it writes. It never removes your SSH keys, never
+changes your password, and leaves Tailscale installed on `undo`.
 
 ## Lockout protection
 

@@ -30,6 +30,13 @@ archives:
     files:
       - LICENSE
       - README.md
+      - SECURITY.md
+      - CONTRIBUTING.md
+      - install.sh
+      - examples/cloud-init.yaml
+      # Keep the README's relative documentation and image links usable.
+      - docs/*.md
+      - docs/assets/*
 
 checksum:
   name_template: checksums.txt
