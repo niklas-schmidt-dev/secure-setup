@@ -94,6 +94,78 @@ func TestApplyAndRollbackRestoreHostFirewall(t *testing.T) {
 	}
 }
 
+// The confirmation and a rollback fired by the timer claim the outcome of an
+// apply with one atomic mkdir, so a late confirmation never cuts a running
+// rollback short or persists the rules over it.
+func TestConfirmAndRollbackClaimTheOutcome(t *testing.T) {
+	h := &recordHost{}
+	if err := ApplyFirewall(context.Background(), h, 60, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	s := h.all()
+	if clear, armed := strings.Index(s, "rm -rf "+RolledBackMarker+" "+DecidedDir), strings.Index(s, "/bin/sh "+RollbackScript+" --timer"); clear < 0 || armed < clear {
+		t.Fatalf("apply must clear the claim before arming the timer:\n%s", s)
+	}
+	h = &recordHost{}
+	if err := ConfirmFirewall(context.Background(), h, &Facts{}, false, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	s = h.all()
+	dry, claim, stop := strings.Index(s, `nft -c -f "$check"`), strings.Index(s, "if ! mkdir "+DecidedDir+" 2>/dev/null; then"), strings.Index(s, "systemctl stop "+RollbackUnit+".timer")
+	if dry < 0 || claim < dry || stop < claim || !strings.Contains(s[claim:stop], "exit 2") {
+		t.Fatalf("confirm must claim the outcome after the dry run and before cancelling the timer:\n%s", s)
+	}
+	if strings.Contains(s, "systemctl stop "+RollbackUnit+".service") {
+		t.Fatal("confirm still stops a running rollback")
+	}
+}
+
+// rollback.sh run by the timer leaves the firewall alone once the
+// confirmation claimed the outcome; run by hand it always restores. Run with
+// the system's sh, nft and friends stubbed.
+func TestRollbackScriptHonoursTheClaim(t *testing.T) {
+	dir := t.TempDir()
+	state, bin := filepath.Join(dir, "state"), filepath.Join(dir, "bin")
+	for _, d := range []string{state, bin} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"nft", "logger"} {
+		stub := "#!/bin/sh\necho \"" + name + " $*\" >> " + filepath.Join(dir, "calls") + "\n"
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(stub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(state, "previous.nft"), []byte("table inet secure_setup\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := strings.Replace(asset("rollback.sh"), "STATE=/var/lib/secure-setup", "STATE="+state, 1)
+	run := func(args ...string) (restored bool) {
+		t.Helper()
+		_ = os.Remove(filepath.Join(dir, "calls"))
+		cmd := exec.Command("sh", append([]string{"-c", script, "rollback.sh"}, args...)...)
+		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
+		return strings.Contains(string(calls), "nft -f "+state+"/previous.nft")
+	}
+	if !run("--timer") {
+		t.Fatal("the timer's rollback did not restore with nothing confirmed")
+	}
+	if _, err := os.Stat(filepath.Join(state, "decided")); err != nil {
+		t.Fatal("the timer's rollback did not claim the outcome")
+	}
+	if run("--timer") {
+		t.Fatal("the timer's rollback restored after the outcome was claimed")
+	}
+	if !run() {
+		t.Fatal("a rollback by hand did not restore")
+	}
+}
+
 // Confirmation retires the host firewall for good, and masks a firewalld
 // that is enabled at boot even when it was not running.
 func TestConfirmRetiresAndMasks(t *testing.T) {
@@ -141,6 +213,23 @@ func TestDetectListsEveryDefaultRouteDevice(t *testing.T) {
 	}
 }
 
+// Facts reach the wizard's forms, so the server's text loses its control
+// characters before it gets there.
+func TestDetectCleansFacts(t *testing.T) {
+	out := "SYSTEMD=1\nWAN=eth0\nTAILSCALE=1\nPRETTY=Debian\x1b]52;c;ZXZpbA==\a\nHOSTNAME=vps\x1b[2J\nEVIL=1\nX" + strings.Repeat("Y", 100) + "=2\n"
+	status := `{"BackendState":"Running\u001b[2J","Self":{"TailscaleIPs":["100.64.0.5\u001b]0;x\u0007"]}}`
+	f, err := Detect(context.Background(), &recordHost{stdout: func(string) string { return out }, output: func(string) string { return status }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.PrettyName != "Debian?]52;c;ZXZpbA==?" || f.Hostname != "vps?[2J" || f.TailscaleState != "Running?[2J" || f.TailscaleIPv4 != "100.64.0.5?]0;x?" {
+		t.Fatalf("facts not cleaned: %q %q %q %q", f.PrettyName, f.Hostname, f.TailscaleState, f.TailscaleIPv4)
+	}
+	if !f.Systemd || f.WANIface != "eth0" {
+		t.Fatalf("facts lost: %+v", f)
+	}
+}
+
 // A network card with a public address faces the internet even without a
 // default route; private, shared (CGNAT, Tailscale) and ULA addresses do not.
 func TestDetectFindsPublicNICs(t *testing.T) {
@@ -155,8 +244,57 @@ func TestDetectFindsPublicNICs(t *testing.T) {
 	if want := []string{"eth0", "eth1", "eth5"}; !slices.Equal(f.PublicNICs, want) {
 		t.Fatalf("PublicNICs %q, want %q", f.PublicNICs, want)
 	}
-	if !strings.Contains(detectScript, `/sys/class/net/$dev/device`) {
+	if !strings.Contains(detectScript, "sysnet=/sys/class/net\n"+onCardScript) || !strings.Contains(detectScript, `if oncard "$dev" 0`) {
 		t.Fatal("detect does not limit public addresses to network cards")
+	}
+}
+
+// A VLAN, bond or bridge on top of a network card is on the wire too; a
+// Docker bridge over veths and a VPN device are not. Run with the system's sh
+// on a fake /sys/class/net.
+func TestOnCardScript(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(dev string, lowers ...string) {
+		if err := os.MkdirAll(filepath.Join(dir, dev), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range lowers {
+			if err := os.Symlink(filepath.Join("..", l), filepath.Join(dir, dev, "lower_"+l)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, card := range []string{"eth0", "eth1", "eth2"} {
+		mk(card)
+		if err := os.WriteFile(filepath.Join(dir, card, "device"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("eth0.100", "eth0")
+	mk("bond0", "eth1", "eth2")
+	mk("bond0.7", "bond0")
+	mk("br0", "bond0.7")
+	mk("veth1")
+	mk("docker0", "veth1")
+	mk("wg0")
+	mk("deep4", "deep3")
+	mk("deep3", "deep2")
+	mk("deep2", "deep1")
+	mk("deep1", "br0")
+	want := map[string]bool{"eth0": true, "eth0.100": true, "bond0": true, "bond0.7": true, "br0": true, "docker0": false, "veth1": false, "wg0": false, "nonexistent": false, "deep1": true, "deep4": false}
+	var calls strings.Builder
+	for dev := range want {
+		calls.WriteString(`if oncard '` + dev + `' 0; then echo "` + dev + ` yes"; else echo "` + dev + ` no"; fi` + "\n")
+	}
+	out, err := exec.Command("sh", "-c", "set -eu\nsysnet="+dir+"\n"+onCardScript+calls.String()).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		dev, got, _ := strings.Cut(line, " ")
+		if (got == "yes") != want[dev] {
+			t.Errorf("oncard %s = %s, want %v", dev, got, want[dev])
+		}
 	}
 }
 

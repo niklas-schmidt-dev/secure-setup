@@ -5,6 +5,8 @@ import (
 	"errors"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/niklas-schmidt-dev/secure-setup/internal/runner"
 )
 
 // promptKind selects the form a prompt renders as.
@@ -37,6 +39,9 @@ type prompter struct {
 var errAborted = errors.New("cancelled by the user")
 
 func (p prompter) ask(ctx context.Context, m promptMsg) (promptReply, error) {
+	// Questions can carry server text, such as the name of the tailnet a
+	// login link joined.
+	m.title, m.detail = runner.Printable(m.title), runner.Printable(m.detail)
 	m.reply = make(chan promptReply, 1)
 	p.send(m)
 	select {

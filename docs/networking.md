@@ -64,9 +64,9 @@ the explicit network allowances listed below.
 - loopback, established and related connections, the ICMP types networks need, DHCP replies: accept
 - ping: accept with a rate limit (optional)
 - UDP 41641 from anywhere: accept (direct Tailscale connections; authenticated WireGuard)
-- SSH and any extra ports you chose, only on `tailscale0`: accept (with a counter: `nft list chain inet secure_setup input` shows how many connections came in this way)
+- SSH and any extra ports you chose, only on `tailscale0`: accept (with a counter: `nft list chain inet secure_setup input` shows how many connections came in this way). With an [existing private network](#existing-private-networks), only to its `admin_address` on its interface
 - TCP 443 (and 80 if chosen), only from Cloudflare's ranges: accept
-- forwarded traffic (Docker, VMs): allowed from inside, allowed from the internet only through Cloudflare on the web ports. "The internet" is every interface with a default route, IPv4 or IPv6, and every network card with a public address, such as a second public NIC without a default route; traffic arriving on anything else (Docker and VM bridges, VPN and tunnel devices, private networks) counts as inside
+- forwarded traffic (Docker, VMs): allowed from inside, allowed from the internet only through Cloudflare on the web ports. "The internet" is every interface with a default route, IPv4 or IPv6, every network card with a public address, such as a second public NIC without a default route, a VLAN, bond or bridge on top of such a card, and every interface the plan lists in `extra_wan_interfaces`; traffic arriving on anything else (Docker and VM bridges, VPN and tunnel devices, private networks) counts as inside
 - outbound: allowed
 
 Preview the rules for a saved plan before applying them:
@@ -85,9 +85,19 @@ including when Docker maps it to a different container port.
 
 The public-uplink set includes every interface with an IPv4 or IPv6 default
 route and every network card with a public address, even if it has no default
-route. Other interfaces, including Docker and VM bridges, VPN devices and
-private networks, count as the inside. Review that boundary if you are using
-extra interfaces or routed networks.
+route, including a VLAN, bond or bridge built on such a card. Other
+interfaces, including Docker and VM bridges, VPN devices and private
+networks, count as the inside. Review that boundary if you are using extra
+interfaces or routed networks. An uplink that no address gives away, such as
+a private address that the provider's NAT makes reachable from the internet,
+goes into the plan's `firewall` object:
+
+```json
+"extra_wan_interfaces": ["ens10"]
+```
+
+Forwarded traffic from it is then filtered like the internet. Each listed
+interface must exist on the server.
 
 ## Tailscale SSH
 
@@ -110,6 +120,12 @@ the plan's `tailscale` object. Tailscale is then not installed. The private
 address must already be reachable from the machine running a remote setup.
 Keep the remaining fields from your saved plan and verify the generated
 rules with `secure-setup render -f plan.json`.
+
+`admin_address` is an IP address, and the admin rule only accepts traffic to
+that address on `admin_interface`. If the same interface also carries a
+public address, SSH to the public address stays blocked, and when the
+interface faces the internet, forwarded traffic arriving on it is filtered
+like the internet.
 
 ## Existing connections and service reloads
 

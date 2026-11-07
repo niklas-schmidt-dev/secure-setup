@@ -312,7 +312,9 @@ func cmdRender(args []string) error {
 	}
 	out, err := nftgen.Render(nftgen.Params{
 		AdminInterface:   p.Tailscale.AdminInterface,
+		AdminAddress:     p.AdminAddr(),
 		WANInterface:     p.Firewall.WANInterface,
+		ExtraWAN:         p.Firewall.ExtraWANInterfaces,
 		TailnetTCPPorts:  p.Firewall.TailnetPorts,
 		TailnetAll:       p.Firewall.TailnetAll,
 		WebPorts:         p.Firewall.WebPorts,
@@ -380,6 +382,10 @@ func cmdBootCheck(ctx context.Context) error {
 	return err
 }
 
+// printUndoLine shows a line of the undo script's output, which comes from
+// the server and must not drive this terminal.
+func printUndoLine(line string) { fmt.Println("   ", runner.Printable(line)) }
+
 func cmdUndo(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("undo", flag.ContinueOnError)
 	host := fs.String("host", "", "address to connect to (tailnet IP or name)")
@@ -413,7 +419,7 @@ func cmdUndo(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		return h.Script(ctx, undoScript, func(line string) { fmt.Println("   ", line) })
+		return h.Script(ctx, undoScript, printUndoLine)
 	}
 	auth := sshx.Auth{User: *user, KeyPath: *key, Password: os.Getenv("SECURE_SETUP_PASSWORD"), Passphrase: os.Getenv("SECURE_SETUP_PASSPHRASE")}
 	c, err := sshx.Dial(ctx, fmt.Sprintf("%s:%d", *host, *port), auth, sshx.HostKeyPolicy{Prompter: prompt})
@@ -424,5 +430,5 @@ func cmdUndo(ctx context.Context, args []string) error {
 	if err := c.EnsureRoot(ctx); err != nil {
 		return err
 	}
-	return c.Script(ctx, undoScript, func(line string) { fmt.Println("   ", line) })
+	return c.Script(ctx, undoScript, printUndoLine)
 }

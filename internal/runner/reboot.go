@@ -184,9 +184,27 @@ func (r *Runner) rebootAndCheck(ctx context.Context, log func(string)) error {
 	if err != nil {
 		return err
 	}
+	checked := []string{"rules loaded", "nftables enabled at boot"}
+	if expect.Tailscale {
+		checked = append(checked, "Tailscale running")
+	}
+	if expect.Hardened {
+		checked = append(checked, "sshd keys only")
+	}
+	if expect.Tunnel {
+		checked = append(checked, "Cloudflare Tunnel connected")
+	}
+	// Public SSH is tested again only when the run could test it before.
 	if r.result.PublicSSHClosed {
-		if open, _ := r.publicSSHOpen(ctx); open {
+		switch res, detail := r.probePublicSSH(ctx); res {
+		case probeOpen:
 			problems = append(problems, "a new connection to "+r.o.Plan.Address()+" succeeds again")
+		case probeBlocked:
+			checked = append(checked, "public SSH blocked")
+		default:
+			r.result.PublicSSHClosed = false
+			r.result.PublicSSHNote = "blocked before the reboot, not tested again after it: a new connection to " + r.o.Plan.Address() + " could not be tried from here (" + detail + ")"
+			r.attention("public SSH " + r.result.PublicSSHNote)
 		}
 	}
 	if len(problems) > 0 {
@@ -194,7 +212,7 @@ func (r *Runner) rebootAndCheck(ctx context.Context, log func(string)) error {
 	}
 	r.result.RebootChecked = true
 	r.result.RebootNeeded = false
-	log("after the reboot: rules loaded, nftables enabled at boot, " + map[bool]string{true: "Tailscale running, ", false: ""}[expect.Tailscale] + map[bool]string{true: "sshd keys only, ", false: ""}[expect.Hardened] + map[bool]string{true: "Cloudflare Tunnel connected, ", false: ""}[expect.Tunnel] + "public SSH blocked")
+	log("after the reboot: " + strings.Join(checked, ", "))
 	return nil
 }
 

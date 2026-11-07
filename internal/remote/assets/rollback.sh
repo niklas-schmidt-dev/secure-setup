@@ -1,9 +1,16 @@
 #!/bin/sh
 # secure-setup: restore the firewall state from before the last apply.
-# Fired by the secure-setup-rollback timer when the new rules were not
-# confirmed over the tailnet in time. Safe to run by hand.
+# Fired by the secure-setup-rollback timer (with --timer) when the new rules
+# were not confirmed over the tailnet in time. Safe to run by hand.
 set -u
 STATE=/var/lib/secure-setup
+
+# The confirmation and the timer each claim the outcome of an apply with an
+# atomic mkdir; whichever comes second leaves the firewall alone.
+if [ "${1:-}" = --timer ] && ! mkdir "$STATE/decided" 2>/dev/null; then
+	echo "secure-setup: the new rules were confirmed; nothing to roll back"
+	exit 0
+fi
 
 if [ -s "$STATE/previous.nft" ] && nft -f "$STATE/previous.nft"; then
 	msg="firewall rolled back to the previous state"

@@ -70,7 +70,8 @@ echo "== assertions after run 1"
 if d exec "$cli" nc -z -w 5 "$pubip" 22; then fail "public ssh still open"; else echo "   public ssh blocked"; fi
 d exec "$cli" nc -z -w 5 "$prvip" 22 && echo "   private ssh open"
 d exec "$cli" nc -z -w 5 "$prvip" 8080 2>/dev/null && fail "nothing listens on 8080, nc should not connect" || true
-d exec "$srv" nft list chain inet secure_setup input | grep -Eq 'iifname "eth1" tcp dport \{ 22, 8080 \} counter packets [0-9]+ bytes [0-9]+ accept' && echo "   tailnet rule present"
+d exec "$srv" nft list chain inet secure_setup input | grep -Eq "iifname \"eth1\" ip daddr $prvip tcp dport \\{ 22, 8080 \\} counter packets [0-9]+ bytes [0-9]+ accept" || fail "admin rule not bound to $prvip on eth1"
+echo "   tailnet rule present, bound to $prvip"
 d exec "$srv" nft list set inet secure_setup cloudflare_v4 | grep -q '173.245.48.0/20' && echo "   cloudflare set populated"
 d exec "$srv" sh -c 'systemctl is-enabled nftables' | grep -q enabled && echo "   nftables.service enabled"
 d exec "$srv" systemctl is-active --quiet secure-setup-cloudflare-sync.timer && echo "   cloudflare sync timer active"
@@ -97,7 +98,8 @@ fi
 tail -8 /tmp/e2e-run2.log
 grep -q "rolled back" /tmp/e2e-run2.log || fail "run 2 did not report the rollback"
 d exec "$cli" nc -z -w 5 "$prvip" 22 && echo "   private ssh open again after rollback"
-d exec "$srv" nft list chain inet secure_setup input | grep -Eq 'iifname "eth1" tcp dport \{ 22, 8080 \} counter packets [0-9]+ bytes [0-9]+ accept' && echo "   previous (run 1) rules restored"
+d exec "$srv" nft list chain inet secure_setup input | grep -Eq "iifname \"eth1\" ip daddr $prvip tcp dport \\{ 22, 8080 \\} counter packets [0-9]+ bytes [0-9]+ accept" || fail "run 1 rules not restored"
+echo "   previous (run 1) rules restored"
 if d exec "$cli" nc -z -w 5 "$pubip" 22; then fail "public ssh open after rollback"; else echo "   public ssh still blocked"; fi
 d exec "$srv" test -f /var/lib/secure-setup/rolled-back && echo "   rollback marker written"
 

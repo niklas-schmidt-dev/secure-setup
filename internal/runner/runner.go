@@ -10,8 +10,8 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
-	"unicode"
 
 	"golang.org/x/crypto/ssh"
 
@@ -75,9 +75,9 @@ type Result struct {
 	DNSName         string // MagicDNS name, when known
 	SSHPort         int
 	PublicAddress   string // the server's internet address, when known
-	PublicSSHClosed bool
-	PublicSSHNote   string
-	ConfirmedBy     string // local runs: "login from <peer>" or the self-check summary
+	PublicSSHClosed bool   // a fresh connection from here to public SSH was refused or timed out
+	PublicSSHNote   string // why public SSH was not tested, or how to test it (local runs)
+	ConfirmedBy     string // local runs: "login by <user> from <peer>" or the self-check summary
 	Hardened        bool
 	HardenNote      string // why hardening was skipped, if it was
 	WebPorts        []int
@@ -102,8 +102,8 @@ type Runner struct {
 
 	// local mode
 	local      *localhost.Host
-	before     []remote.Session // sshd sessions before the firewall was applied
-	applyEpoch int64            // server clock when the rules went live
+	before     []remote.Session // sshd sessions open before or as the firewall went live
+	applyEpoch int64            // server clock once the rules were live
 	tsState    *remote.TSStatus
 	sshdPrev   string // the sshd drop-in an earlier run left; restored on failure
 
@@ -735,8 +735,13 @@ func verifyKeysOnly(ctx context.Context, host remote.Host, user, laddr string, p
 // resolveWAN picks the internet interface for the forward chain. A value in
 // the plan that differs from this server's default-route interface (for
 // example from a plan saved on another server) must exist here and be
-// confirmed with wan_interface_override.
+// confirmed with wan_interface_override; extra_wan_interfaces must exist too.
 func resolveWAN(ctx context.Context, host remote.Host, p *plan.Plan, f *remote.Facts, log func(string)) error {
+	for _, n := range p.Firewall.ExtraWANInterfaces {
+		if !remote.InterfaceExists(ctx, host, n) {
+			return fmt.Errorf("the plan's extra_wan_interfaces names %q, which does not exist on this server", n)
+		}
+	}
 	switch {
 	case p.Firewall.WANInterface == "" && f.WANIface == "":
 		return errors.New("could not find the interface with the default route; set wan_interface in the plan")
@@ -759,21 +764,28 @@ func (r *Runner) stageFirewall(ctx context.Context, log func(string)) error {
 }
 
 // extraWAN lists the other internet-facing devices: those with a default
-// route (an IPv6 uplink, a second provider link) and network cards with a
-// public address but no default route. Forwarded traffic from them is
-// treated like the internet, not like an internal bridge.
+// route (an IPv6 uplink, a second provider link), network cards with a
+// public address but no default route, and those the plan names in
+// extra_wan_interfaces. Forwarded traffic from them is treated like the
+// internet, not like an internal bridge. An existing private network's
+// interface is one of them when it faces the internet too: its admin rule
+// only accepts the admin address.
 func (r *Runner) extraWAN(log func(string)) []string {
+	p := r.o.Plan
 	var seen, out []string
-	for _, n := range append(slices.Clone(r.facts.WANIfaces), r.facts.PublicNICs...) {
+	for _, n := range slices.Concat(r.facts.WANIfaces, r.facts.PublicNICs, p.Firewall.ExtraWANInterfaces) {
 		if slices.Contains(seen, n) {
 			continue
 		}
 		seen = append(seen, n)
-		switch n {
-		case r.o.Plan.Firewall.WANInterface:
-		case r.o.Plan.Tailscale.AdminInterface:
+		switch {
+		case n == p.Firewall.WANInterface:
+		case n == p.Tailscale.AdminInterface && !p.Tailscale.UseExisting:
 			log("the admin interface " + n + " also faces the internet; it stays trusted for forwarding")
 		default:
+			if n == p.Tailscale.AdminInterface {
+				log("the admin interface " + n + " also faces the internet: administration is only accepted on " + p.Tailscale.AdminAddress + ", and forwarded traffic from " + n + " is filtered like the internet")
+			}
 			out = append(out, n)
 		}
 	}
@@ -797,6 +809,7 @@ func (r *Runner) stageFirewallOn(ctx context.Context, host remote.Host, log func
 	}
 	ruleset, err := nftgen.Render(nftgen.Params{
 		AdminInterface:   p.Tailscale.AdminInterface,
+		AdminAddress:     p.AdminAddr(),
 		WANInterface:     p.Firewall.WANInterface,
 		ExtraWAN:         r.extraWAN(log),
 		TailnetTCPPorts:  p.Firewall.TailnetPorts,
@@ -907,28 +920,76 @@ func (r *Runner) verify(ctx context.Context, log func(string)) error {
 
 	// A brand-new TCP connection to the public address must now be blocked.
 	// (The connection from step 1 survives: it is an established flow.)
-	open, detail := r.publicSSHOpen(ctx)
-	if open {
-		r.result.PublicSSHClosed = false
-		r.result.PublicSSHNote = "a new connection to " + p.Address() + " still succeeds. If this address is not the server's internet interface (" + p.Firewall.WANInterface + "), that is expected; otherwise check the WAN interface name."
-		r.attention(r.result.PublicSSHNote)
+	pubIP := r.facts.WANIPv4
+	if pubIP == "" {
+		pubIP = "<public address>"
+	}
+	public := fmt.Sprintf("`nc -zv %s %d`", pubIP, r.facts.SSHPort)
+	if r.reachedPrivately(r.pub.RemoteIP()) {
+		r.result.PublicSSHNote = "not tested: this run reached the server at " + p.Address() + ", its private address, where a new connection is meant to work. From a machine outside your private network, " + public + " must fail"
+		r.attention("public SSH " + r.result.PublicSSHNote)
 		return nil
 	}
-	r.result.PublicSSHClosed = true
-	log("new connection to " + p.Address() + " from here: blocked (" + detail + ")")
+	res, detail := r.probePublicSSH(ctx)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	switch res {
+	case probeOpen:
+		return fmt.Errorf("a new connection to %s from here still succeeds, so public SSH is not blocked. The new rules are in place and kept; check them with `nft list ruleset` on the server (only %s should accept new SSH connections)", p.Address(), p.Tailscale.AdminInterface)
+	case probeBlocked:
+		r.result.PublicSSHClosed = true
+		log("new connection to " + p.Address() + " from here: blocked (" + detail + ")")
+	default:
+		r.result.PublicSSHNote = "not tested: a new connection to " + p.Address() + " could not be tried from here (" + detail + "). From another machine, " + public + " must fail"
+		r.attention("public SSH " + r.result.PublicSSHNote)
+	}
 	return nil
 }
 
-// publicSSHOpen reports whether a brand-new connection to the server's public
-// SSH address still succeeds.
-func (r *Runner) publicSSHOpen(ctx context.Context) (bool, string) {
+// reachedPrivately reports whether this run reached the server at its
+// private address (over the tailnet, or at the existing network's address):
+// a new connection there is meant to work and says nothing about public SSH.
+func (r *Runner) reachedPrivately(remoteIP netip.Addr) bool {
+	if r.viaTailnet {
+		return true
+	}
+	a, err := netip.ParseAddr(r.result.AdminAddress)
+	return err == nil && remoteIP.IsValid() && remoteIP == a.Unmap()
+}
+
+// probeResult is what a brand-new connection to public SSH showed.
+type probeResult int
+
+const (
+	probeUntested probeResult = iota // it could not be tried from here
+	probeBlocked
+	probeOpen
+)
+
+// probePublicSSH opens a brand-new connection to the server's public SSH
+// address. Refused or timed out means blocked; a failed name lookup or a
+// missing route on this side proves nothing about the server.
+func (r *Runner) probePublicSSH(ctx context.Context) (probeResult, string) {
 	d := net.Dialer{Timeout: 6 * time.Second}
 	conn, err := d.DialContext(ctx, "tcp", r.o.Plan.Address())
 	if err != nil {
-		return false, shortErr(err)
+		return dialResult(err), shortErr(err)
 	}
 	conn.Close()
-	return true, ""
+	return probeOpen, ""
+}
+
+func dialResult(err error) probeResult {
+	var dnsErr *net.DNSError
+	var netErr net.Error
+	switch {
+	case errors.As(err, &dnsErr):
+		return probeUntested
+	case errors.Is(err, syscall.ECONNREFUSED), errors.As(err, &netErr) && netErr.Timeout():
+		return probeBlocked
+	}
+	return probeUntested
 }
 
 // ---- helpers ----
@@ -948,14 +1009,7 @@ func containsInt(xs []int, x int) bool {
 
 // Printable replaces control characters other than newline and tab, so text
 // that came from the server cannot drive the operator's terminal.
-func Printable(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\t' || !unicode.IsControl(r) {
-			return r
-		}
-		return '?'
-	}, s)
-}
+func Printable(s string) string { return remote.Printable(s) }
 
 func orUnknown(s string) string {
 	if s == "" {

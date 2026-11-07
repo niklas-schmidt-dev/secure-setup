@@ -8,16 +8,20 @@ Remote and server-local setup perform the same work under a rollback timer.
 They differ in how they confirm that the new rules let you in:
 
 - **From your computer**, secure-setup opens a brand-new SSH connection over
-  the tailnet after the rules go live, and afterwards proves from the outside
-  that the public port is closed. Your key is installed and tested before
-  password login is turned off. No separate server-side confirmation command
-  is needed.
+  the tailnet after the rules go live, and afterwards checks from the outside
+  that a new connection to the public port is refused or times out; if it
+  still succeeds, the run fails. If the run reached the server at its private
+  address, or your computer cannot resolve or route the public address, the
+  result says public SSH was not tested. Your key is installed and tested
+  before password login is turned off. No separate server-side confirmation
+  command is needed.
 - **On the server** (`here`), it asks you to log in once more from another
-  device over the tailnet while the timer runs. Only a connection that came
-  in through the new admin rule counts (its packet counter must move), from
-  a machine other than this one, either as a visible session or as an
-  "Accepted" line sshd itself wrote to the journal; with Tailscale SSH, run
-  `secure-setup confirm` in the new session. Password login is only turned
+  device over the tailnet while the timer runs. The new admin rule's packet
+  counter must move, and sshd must write an "Accepted" line to the journal
+  for a login from a machine other than this one, over a connection that
+  opened after the rules went live. A TCP connection that never logs in does
+  not count. With Tailscale SSH, run `secure-setup confirm` in the new
+  session. Password login is only turned
   off when `authorized_keys` holds a key sshd would accept for your account
   (read as that account, no restricting options), or when this run turns
   Tailscale SSH on; if the run then fails or rolls back, password login is
@@ -48,8 +52,11 @@ step: if something did not come back, use the provider console.
    the old connection would survive anyway as an established flow. (On the
    server, it waits for your login from another device instead, or runs the
    self-checks in unattended mode.)
-5. Over that connection it cancels the timer, persists the ruleset and enables
-   the services.
+5. Over that connection it claims the outcome, cancels the timer, persists
+   the ruleset and enables the services. The claim is an atomic `mkdir` that
+   the timer's rollback makes too: whichever comes first decides. A
+   confirmation that arrives after the rollback started fails as rolled back
+   and leaves the rollback to finish.
 
 If step 4 fails, the timer runs `/var/lib/secure-setup/rollback.sh`, which
 restores the saved table (or removes the new one) and writes
@@ -60,7 +67,10 @@ of every change made during setup.
 The wizard offers 60 seconds, 2 minutes or 5 minutes. A saved plan can
 choose a window from 30 to 900 seconds. Package upgrades are not undone.
 Once the confirmation cancels the timer, later failures—including boot
-failures—need their own recovery path.
+failures—need their own recovery path. If persisting the rules fails at that
+point, the confirmed rules stay live, the run reports the error, and a host
+firewall that was running before (ufw, firewalld) is still enabled for the
+next boot.
 
 ## Check the result
 

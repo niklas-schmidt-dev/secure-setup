@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/niklas-schmidt-dev/secure-setup/internal/localhost"
@@ -60,9 +62,58 @@ func TestParseAcceptedLogins(t *testing.T) {
 		"Accepted publickey for root from fe80::1%eth0 port 1 ssh2\n" +
 		"Accepted password for deploy from ::ffff:10.0.0.4 port 2 ssh2"
 	got := parseAcceptedLogins(out)
-	if len(got) != 2 || got[0].From != "100.64.0.9" || got[1].User != "deploy" || got[1].From != "10.0.0.4" {
+	if len(got) != 2 || got[0].From != "100.64.0.9" || got[0].Port != 51000 || got[1].User != "deploy" || got[1].From != "10.0.0.4" || got[1].Port != 2 {
 		t.Fatalf("got %+v", got)
 	}
+}
+
+// Only an accepted login from another machine over a connection that opened
+// after the rules went live confirms them; a bare TCP connection, which never
+// reaches the journal, confirms nothing.
+func TestConfirmingLogin(t *testing.T) {
+	admin, self := netip.MustParseAddr("100.64.0.5"), netip.MustParseAddr("203.0.113.7")
+	before := remote.ParseSessions("0 0 203.0.113.7:22 198.51.100.4:50000\n0 0 100.64.0.5:22 100.64.0.9:41000\n")
+	logins := parseAcceptedLogins("Accepted publickey for root from 127.0.0.1 port 40000 ssh2\n" +
+		"Accepted publickey for root from 100.64.0.5 port 40001 ssh2\n" +
+		"Accepted publickey for root from 203.0.113.7 port 40002 ssh2\n" +
+		"Accepted publickey for root from 198.51.100.4 port 50000 ssh2\n" +
+		"Accepted publickey for root from 100.64.0.9 port 41000 ssh2\n")
+	if l, ok := confirmingLogin(logins, before, self, admin); ok {
+		t.Fatalf("a local or pre-existing connection confirmed: %+v", l)
+	}
+	if _, ok := confirmingLogin(nil, before, self, admin); ok {
+		t.Fatal("confirmed without any accepted login")
+	}
+	logins = append(logins, parseAcceptedLogins("Accepted publickey for root from 100.64.0.9 port 41001 ssh2")...)
+	if l, ok := confirmingLogin(logins, before, self, admin); !ok || l.From != "100.64.0.9" || l.Port != 41001 {
+		t.Fatalf("a new login from a tailnet peer did not confirm: %+v %v", l, ok)
+	}
+}
+
+// The journal query starts once the rules are live and also reads
+// sshd-session, which logs logins since OpenSSH 9.8.
+func TestAcceptedLoginsQuery(t *testing.T) {
+	var cmds []string
+	acceptedLoginsSince(context.Background(), outputHost{cmds: &cmds}, 1700000000)
+	if len(cmds) != 1 {
+		t.Fatalf("commands %q", cmds)
+	}
+	for _, want := range []string{"--since=@1700000000 ", "_UID=0 _COMM=sshd-session", "_UID=0 SYSLOG_IDENTIFIER=sshd "} {
+		if !strings.Contains(cmds[0], want) {
+			t.Fatalf("query %q lacks %q", cmds[0], want)
+		}
+	}
+}
+
+// outputHost records the commands Output runs and prints nothing.
+type outputHost struct {
+	fakeHost
+	cmds *[]string
+}
+
+func (h outputHost) Output(_ context.Context, cmd string) (string, error) {
+	*h.cmds = append(*h.cmds, cmd)
+	return "", nil
 }
 
 // fakeHost answers `ip -o link show <iface>` for the listed interfaces.
@@ -100,6 +151,13 @@ func TestResolveWAN(t *testing.T) {
 	if err := resolveWAN(ctx, fakeHost{ifaces: []string{"eth0"}}, &p, f, log); err != nil || p.Firewall.WANInterface != "eth0" {
 		t.Fatalf("explicit override refused: %v", err)
 	}
+	p.Firewall.ExtraWANInterfaces = []string{"ens10"}
+	if err := resolveWAN(ctx, fakeHost{ifaces: []string{"eth0"}}, &p, f, log); err == nil || !strings.Contains(err.Error(), "extra_wan_interfaces") {
+		t.Fatalf("an absent extra_wan_interfaces entry was accepted: %v", err)
+	}
+	if err := resolveWAN(ctx, fakeHost{ifaces: []string{"eth0", "ens10"}}, &p, f, log); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // Other default-route devices and public network cards join the internet
@@ -119,6 +177,21 @@ func TestExtraWAN(t *testing.T) {
 	}
 	if len(logs) != 2 || !strings.Contains(logs[0], "eth1") {
 		t.Fatalf("logs = %q", logs)
+	}
+	// An uplink detection cannot see (a private address behind the
+	// provider's NAT) joins when the plan names it.
+	p.Firewall.ExtraWANInterfaces = []string{"ens10", "ens4"}
+	if got := r.extraWAN(func(string) {}); !slices.Equal(got, []string{"he-ipv6", "ens4", "ens5", "ens10"}) {
+		t.Fatalf("extraWAN with extra_wan_interfaces = %q", got)
+	}
+	p.Firewall.ExtraWANInterfaces = nil
+	// An existing private network binds its rule to the admin address, so
+	// its internet-facing interface is filtered like the internet.
+	p.Tailscale.UseExisting, p.Tailscale.AdminAddress = true, "10.0.0.5"
+	logs = nil
+	got = r.extraWAN(func(l string) { logs = append(logs, l) })
+	if !slices.Equal(got, []string{"he-ipv6", "eth1", "ens4", "ens5"}) || !strings.Contains(logs[0], "only accepted on 10.0.0.5") {
+		t.Fatalf("existing network: extraWAN = %q, logs %q", got, logs)
 	}
 }
 
@@ -178,6 +251,57 @@ func TestStepOrder(t *testing.T) {
 	}
 	if !plan.Default().UpdateSystem || !plan.Default().Reboot {
 		t.Fatal("the system update and the reboot check are not on by default")
+	}
+}
+
+// The public SSH probe tells blocked (refused, timed out) from open and from
+// what proves nothing about the server (a failed lookup on this side).
+func TestProbePublicSSH(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := ln.Addr().(*net.TCPAddr).Port
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := closed.Addr().(*net.TCPAddr).Port
+	closed.Close()
+	defer ln.Close()
+	for _, c := range []struct {
+		host string
+		port int
+		want probeResult
+	}{
+		{"127.0.0.1", open, probeOpen},
+		{"127.0.0.1", refused, probeBlocked},
+		{"no-such-host.invalid", 22, probeUntested},
+	} {
+		p := plan.Default()
+		p.Server.Host, p.Server.Port = c.host, c.port
+		r := &Runner{o: Options{Plan: &p}}
+		if got, detail := r.probePublicSSH(context.Background()); got != c.want {
+			t.Errorf("%s:%d: %v (%s), want %v", c.host, c.port, got, detail, c.want)
+		}
+	}
+	timeout := &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}
+	unreachable := &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ENETUNREACH)}
+	if dialResult(timeout) != probeBlocked || dialResult(unreachable) != probeUntested {
+		t.Fatal("a timeout must count as blocked, a missing route as untested")
+	}
+}
+
+// A run that reached the server over the tailnet, or at the existing
+// network's address, does not test public SSH there.
+func TestReachedPrivately(t *testing.T) {
+	r := &Runner{result: Result{AdminAddress: "10.0.0.5"}}
+	if !r.reachedPrivately(netip.MustParseAddr("10.0.0.5")) || r.reachedPrivately(netip.MustParseAddr("203.0.113.7")) || r.reachedPrivately(netip.Addr{}) {
+		t.Fatal("existing network address not told apart")
+	}
+	r.viaTailnet = true
+	if !r.reachedPrivately(netip.MustParseAddr("100.64.0.5")) {
+		t.Fatal("a run over the tailnet tested public SSH")
 	}
 }
 

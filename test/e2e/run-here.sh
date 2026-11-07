@@ -92,20 +92,22 @@ wait_log /root/run1.log "Now prove the new rules" 90
 d exec "$srv" grep -q "this SSH session: 10.250.100.3 -> $pubip over eth0 (the public interface)" /root/run1.log || { d exec "$srv" grep "SSH session" /root/run1.log; fail "session note missing"; }
 sleep 2
 if d exec "$cli" nc -z -w 3 "$pubip" 22; then fail "public ssh still open while confirmation pending"; fi
-echo "   rules live, public ssh blocked; logging in over the private network"
+echo "   rules live, public ssh blocked; a TCP connection that never logs in must not confirm"
+d exec "$cli" timeout 3 nc "$prvip" 22 </dev/null >/dev/null 2>&1 || true
+d exec "$srv" grep -q "EXIT=" /root/run1.log && { d exec "$srv" tail -20 /root/run1.log; fail "a bare TCP connection confirmed the rules"; }
+d exec "$srv" grep -q "a connection arrived from $cliprv over eth1 through the new rule" /root/run1.log || { d exec "$srv" tail -20 /root/run1.log; fail "the rule counter did not register the connection"; }
+echo "   not confirmed by it; logging in over the private network"
 login "$prvip" "echo hello-from-client" | grep -q hello-from-client || fail "private login failed"
 wait_log /root/run1.log "EXIT=" 60
-d exec "$srv" grep -Eq "new SSH session from .* through the eth1 rule: the rules let you in|sshd accepted a login by root from $cliprv after the rules went live" /root/run1.log || { d exec "$srv" tail -30 /root/run1.log; fail "login not detected"; }
-# Both lines need the eth1 rule's counter above zero; which one appears depends
-# on whether a poll still saw the short session open.
-d exec "$srv" grep -Eq "a connection arrived over eth1 through the new rule|new SSH session from .* through the eth1 rule" /root/run1.log || { d exec "$srv" tail -30 /root/run1.log; fail "rule counter did not register the login"; }
+d exec "$srv" grep -q "sshd accepted a login by root from $cliprv after the rules went live" /root/run1.log || { d exec "$srv" tail -30 /root/run1.log; fail "login not detected"; }
 d exec "$srv" grep -q "This machine is locked down" /root/run1.log || { d exec "$srv" tail -30 /root/run1.log; fail "run 1 did not report success"; }
 d exec "$srv" grep -q "EXIT=0" /root/run1.log || fail "run 1 should exit 0"
 
 echo "== assertions after run 1"
 if d exec "$cli" nc -z -w 5 "$pubip" 22; then fail "public ssh still open"; else echo "   public ssh blocked"; fi
 login "$prvip" true && echo "   private ssh open"
-d exec "$srv" nft list chain inet secure_setup input | grep -Eq 'iifname "eth1" tcp dport \{ 22, 8080 \} counter packets [0-9]+ bytes [0-9]+ accept' && echo "   tailnet rule present"
+d exec "$srv" nft list chain inet secure_setup input | grep -Eq "iifname \"eth1\" ip daddr $prvip tcp dport \\{ 22, 8080 \\} counter packets [0-9]+ bytes [0-9]+ accept" || fail "admin rule not bound to $prvip on eth1"
+echo "   tailnet rule present, bound to $prvip"
 d exec "$srv" nft list set inet secure_setup cloudflare_v4 | grep -q '173.245.48.0/20' && echo "   cloudflare set populated"
 d exec "$srv" sh -c 'systemctl is-enabled nftables' | grep -q enabled && echo "   nftables.service enabled"
 d exec "$srv" systemctl is-active --quiet secure-setup-cloudflare-sync.timer && echo "   cloudflare sync timer active"
@@ -113,7 +115,8 @@ d exec "$srv" systemctl is-active --quiet secure-setup-rollback.timer && fail "r
 d exec "$srv" sh -c 'sshd -T | grep -q "^passwordauthentication no"' && echo "   sshd password auth off"
 d exec "$srv" grep -q 'Managed by secure-setup' /etc/nftables.conf && echo "   /etc/nftables.conf persisted"
 d exec "$srv" test -f /var/lib/secure-setup/confirm-expect && fail "confirm-expect left behind" || echo "   confirm markers cleaned"
-d exec "$srv" grep -q 'Confirmed by.*login from' /root/run1.log && echo "   summary names the confirming login"
+d exec "$srv" grep -q "Confirmed by.*login by root from $cliprv" /root/run1.log || fail "summary does not name the confirming login"
+echo "   summary names the confirming login"
 
 echo "== run 2: a session from BEFORE the apply must not count; \`secure-setup confirm\` in it must"
 # ControlMaster: one TCP connection opened before the apply, reused for the

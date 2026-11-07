@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -280,23 +281,32 @@ func (r *Runner) hereHardenSSH(ctx context.Context, log func(string)) error {
 }
 
 func (r *Runner) hereApplyFirewall(ctx context.Context, log func(string)) error {
-	before, err := remote.Sessions(ctx, r.local, r.facts.SSHPort)
-	if err != nil {
-		return err
-	}
-	r.before = before
-	epoch, err := r.local.Output(ctx, "date +%s")
-	if err != nil {
-		return err
-	}
-	r.applyEpoch, _ = strconv.ParseInt(strings.TrimSpace(epoch), 10, 64)
 	if err := r.local.WriteFile(ctx, ConfirmExpectPath, []byte(r.result.AdminAddress+"\n"), "0600"); err != nil {
 		return err
 	}
 	if _, err := r.local.Output(ctx, "rm -f "+ConfirmedPath); err != nil {
 		return err
 	}
-	return r.applyFirewallOn(ctx, r.local, log)
+	before, err := remote.Sessions(ctx, r.local, r.facts.SSHPort)
+	if err != nil {
+		return err
+	}
+	if err := r.applyFirewallOn(ctx, r.local, log); err != nil {
+		return err
+	}
+	// A login counts only from here on, over a connection the new rules let
+	// in: one that was open before or while they went live came in earlier.
+	live, err := remote.Sessions(ctx, r.local, r.facts.SSHPort)
+	if err != nil {
+		return err
+	}
+	r.before = append(before, live...)
+	epoch, err := r.local.Output(ctx, "date +%s")
+	if err != nil {
+		return err
+	}
+	r.applyEpoch, _ = strconv.ParseInt(strings.TrimSpace(epoch), 10, 64)
+	return nil
 }
 
 func (r *Runner) confirmByLogin(ctx context.Context, log func(string)) error {
@@ -329,6 +339,7 @@ func (r *Runner) confirmByLogin(ctx context.Context, log func(string)) error {
 	lastNote := time.Now()
 	arrived := false
 	self := remote.LocalAddrs(ctx, r.local)
+	ignore := append(slices.Clone(self), adminAddr)
 	for {
 		if at := r.rollbackMarker(ctx, r.local); at != "" {
 			return r.rolledBackError(at, errors.New("the rollback fired before a login arrived"))
@@ -339,27 +350,23 @@ func (r *Runner) confirmByLogin(ctx context.Context, log func(string)) error {
 			return r.keepFirewall(ctx, log)
 		}
 		// Only connections that came in through the admin rule count (its
-		// counter is above zero); a local process reaching the admin address
-		// goes over lo and proves nothing. Then either a session from another
-		// machine is visible right now, or sshd logged an accepted login since
-		// the apply (short sessions end between polls).
-		now, err := remote.Sessions(ctx, r.local, r.facts.SSHPort)
-		if err != nil {
-			return err
-		}
+		// counter is above zero). A TCP connection alone proves nothing: sshd
+		// must log the accepted login (short sessions end between polls, the
+		// journal line stays), from another machine (a local process reaches
+		// the admin address over lo), over a connection that was not open
+		// when the rules went live.
 		if n, _ := r.adminRuleCounter(ctx); n > 0 {
-			if fresh := remote.NewSessionsTo(r.before, now, adminAddr, self...); len(fresh) > 0 {
-				peer := fresh[0].Peer.Addr().String()
-				r.result.ConfirmedBy = "login from " + peer
-				log("new SSH session from " + peer + " through the " + p.Tailscale.AdminInterface + " rule: the rules let you in")
-				return r.keepFirewall(ctx, log)
-			}
 			if !arrived {
 				arrived = true
-				log(fmt.Sprintf("a connection arrived over %s through the new rule; waiting for the login to complete", p.Tailscale.AdminInterface))
+				from := ""
+				if now, err := remote.Sessions(ctx, r.local, r.facts.SSHPort); err == nil {
+					if fresh := remote.NewSessionsTo(r.before, now, adminAddr, self...); len(fresh) > 0 {
+						from = " from " + fresh[0].Peer.Addr().String()
+					}
+				}
+				log(fmt.Sprintf("a connection arrived%s over %s through the new rule; waiting for sshd to accept the login (with Tailscale SSH, run `secure-setup confirm` in that session)", from, p.Tailscale.AdminInterface))
 			}
-			if logins := acceptedLoginsSince(ctx, r.local, r.applyEpoch); len(logins) > 0 {
-				l := logins[len(logins)-1]
+			if l, ok := confirmingLogin(acceptedLoginsSince(ctx, r.local, r.applyEpoch), r.before, ignore...); ok {
 				r.result.ConfirmedBy = "login by " + l.User + " from " + l.From
 				log("sshd accepted a login by " + l.User + " from " + l.From + " after the rules went live: they let you in")
 				return r.keepFirewall(ctx, log)
@@ -395,21 +402,44 @@ func (r *Runner) adminRuleCounter(ctx context.Context) (int, error) {
 // AcceptedLogin is one "Accepted <method> for <user> from <ip> port <port>" line of sshd.
 type AcceptedLogin struct {
 	Method, User, From string
+	Port               uint16
 }
 
 var (
-	acceptedRe  = regexp.MustCompile(`^Accepted (\S+) for (\S+) from (\S+) port \d+`)
+	acceptedRe  = regexp.MustCompile(`^Accepted (\S+) for (\S+) from (\S+) port (\d+)`)
 	loginUserRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}\$?$`)
 )
 
+// confirmingLogin returns the newest login that proves the new rules let
+// someone in: from a peer that is not this machine (ignore lists its
+// addresses), over a connection that was not open before or while the rules
+// went live (before). Once they are live, a new connection to sshd from
+// another machine only gets in through the admin rule.
+func confirmingLogin(logins []AcceptedLogin, before []remote.Session, ignore ...netip.Addr) (AcceptedLogin, bool) {
+	for i := len(logins) - 1; i >= 0; i-- {
+		l := logins[i]
+		from, err := netip.ParseAddr(l.From)
+		if err != nil || from.IsLoopback() || slices.Contains(ignore, from) {
+			continue
+		}
+		peer := netip.AddrPortFrom(from, l.Port)
+		if slices.ContainsFunc(before, func(s remote.Session) bool { return s.Peer == peer }) {
+			continue
+		}
+		return l, true
+	}
+	return AcceptedLogin{}, false
+}
+
 // acceptedLoginsSince reads sshd's accepted logins from the journal. Only
 // entries journald attributes to root count: _UID is set from the sender's
-// credentials, so `logger -t sshd` from another user does not match.
+// credentials, so `logger -t sshd` from another user does not match. Since
+// OpenSSH 9.8 the per-connection process that logs them is sshd-session.
 func acceptedLoginsSince(ctx context.Context, host remote.Host, epoch int64) []AcceptedLogin {
 	if epoch == 0 {
 		return nil
 	}
-	cmd := fmt.Sprintf(`journalctl -q --no-pager -o cat --since=@%d _UID=0 _COMM=sshd + _UID=0 SYSLOG_IDENTIFIER=sshd 2>/dev/null | grep -E '^Accepted ' || true`, epoch-1)
+	cmd := fmt.Sprintf(`journalctl -q --no-pager -o cat --since=@%d _UID=0 _COMM=sshd + _UID=0 SYSLOG_IDENTIFIER=sshd + _UID=0 _COMM=sshd-session + _UID=0 SYSLOG_IDENTIFIER=sshd-session 2>/dev/null | grep -E '^Accepted ' || true`, epoch)
 	out, err := host.Output(ctx, cmd)
 	if err != nil {
 		return nil
@@ -430,7 +460,11 @@ func parseAcceptedLogins(out string) []AcceptedLogin {
 		if err != nil || a.Zone() != "" {
 			continue
 		}
-		logins = append(logins, AcceptedLogin{Method: m[1], User: m[2], From: a.Unmap().String()})
+		port, err := strconv.ParseUint(m[4], 10, 16)
+		if err != nil {
+			continue
+		}
+		logins = append(logins, AcceptedLogin{Method: m[1], User: m[2], From: a.Unmap().String(), Port: uint16(port)})
 	}
 	return logins
 }

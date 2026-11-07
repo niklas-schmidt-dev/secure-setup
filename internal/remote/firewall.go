@@ -18,6 +18,11 @@ const (
 	RollbackScript   = StateDir + "/rollback.sh"
 	RolledBackMarker = StateDir + "/rolled-back"
 	RollbackUnit     = "secure-setup-rollback"
+	// DecidedDir is created, atomically, by whichever claims an apply's
+	// outcome first: ConfirmFirewall or the rollback timer's run of
+	// rollback.sh. The other then leaves the firewall alone, so a late
+	// confirmation never cuts a rollback short or persists over it.
+	DecidedDir = StateDir + "/decided"
 
 	// Host firewalls that were running when the run started. They are stopped
 	// only while the rollback timer is armed, restarted by a rollback or a
@@ -146,8 +151,8 @@ systemctl stop %[1]s.timer >/dev/null 2>&1 || true
 systemctl stop %[1]s.service >/dev/null 2>&1 || true
 systemctl reset-failed %[1]s.service >/dev/null 2>&1 || true
 systemctl reset-failed %[1]s.timer >/dev/null 2>&1 || true
-rm -f %[2]s
-systemd-run --quiet --unit=%[1]s --on-active=%[3]d --timer-property=AccuracySec=1s --description="secure-setup firewall rollback" /bin/sh %[4]s
+rm -rf %[2]s %[9]s
+systemd-run --quiet --unit=%[1]s --on-active=%[3]d --timer-property=AccuracySec=1s --description="secure-setup firewall rollback" /bin/sh %[4]s --timer
 echo "rollback timer armed: fires in %[3]ds unless confirmed"
 %[8]sif [ -e %[6]s ]; then
 	if [ -n "$ufw_init" ]; then "$ufw_init" stop >/dev/null; else ufw --force disable >/dev/null; fi
@@ -162,7 +167,7 @@ if ! nft -f %[5]s; then
 	exit 1
 fi
 echo "new firewall rules are live"
-`, RollbackUnit, RolledBackMarker, rollbackSeconds, RollbackScript, PendingPath, UFWWasActive, FirewalldWasActive, ufwInitScript)
+`, RollbackUnit, RolledBackMarker, rollbackSeconds, RollbackScript, PendingPath, UFWWasActive, FirewalldWasActive, ufwInitScript, DecidedDir)
 	if err := c.Script(ctx, script, onLine); err != nil {
 		return fmt.Errorf("apply firewall: %w", err)
 	}
@@ -222,12 +227,14 @@ echo "daily Cloudflare range refresh enabled (%s.timer)"
 %s
 `, SyncUnit, SyncUnit, SyncScriptPath)
 	}
-	// The host firewall is retired last: if persisting fails, it is still
-	// enabled at boot.
+	// Claiming the outcome comes first: a rollback that already started runs
+	// to its end, and the confirmation then fails as rolled back. The host
+	// firewall is retired last: if persisting fails, it is still enabled at
+	// boot.
 	script := fmt.Sprintf(`
 if [ -e %[1]s ]; then echo "the rollback already fired at $(cat %[1]s)" >&2; exit 2; fi
-%[10]s%[11]ssystemctl stop %[2]s.timer
-systemctl stop %[2]s.service >/dev/null 2>&1 || true
+%[10]s%[11]sif ! mkdir %[12]s 2>/dev/null; then echo "the rollback timer fired before the confirmation; it restores the previous firewall" >&2; exit 2; fi
+systemctl stop %[2]s.timer
 echo "rollback timer cancelled"
 nft list table inet %[3]s >/dev/null
 if [ -f %[4]s ] && ! grep -q '%[5]s' %[4]s; then
@@ -236,7 +243,7 @@ if [ -f %[4]s ] && ! grep -q '%[5]s' %[4]s; then
 fi
 install -m 0644 %[6]s %[4]s
 %[7]secho "ruleset persisted in %[4]s; nftables.service loads it at boot ($boot)"
-%[9]s%[8]s`, RolledBackMarker, RollbackUnit, nftgen.TableName, nftgen.ConfigPath, nftgen.Marker, PendingPath, bootWiring, sync, retireScript, NFTBootFileScript, preflight)
+%[9]s%[8]s`, RolledBackMarker, RollbackUnit, nftgen.TableName, nftgen.ConfigPath, nftgen.Marker, PendingPath, bootWiring, sync, retireScript, NFTBootFileScript, preflight, DecidedDir)
 	if err := c.Script(ctx, script, onLine); err != nil {
 		if exitStatus(err) == 2 {
 			return ErrRolledBack
