@@ -1,9 +1,10 @@
 #!/bin/sh
-# End-to-end test on the NAS Docker host: a throwaway systemd "VPS" with two
-# networks (eth0 = "internet", eth1 = "private network") and a client container
-# that runs secure-setup against it. Covers: detection, nftables install,
-# sshd hardening, Cloudflare ranges, apply + confirm, verification that the
-# public port is closed, the automatic rollback, and undo.
+# End-to-end test on a Docker host (the NAS, or the runner in CI): a throwaway
+# systemd "VPS" with two networks (eth0 = "internet", eth1 = "private network")
+# and a client container that runs secure-setup against it. Covers: detection,
+# nftables install, sshd hardening, Cloudflare ranges, apply + confirm,
+# verification that the public port is closed, the automatic rollback, and
+# undo.
 # Usage: test/e2e/run.sh          (DOCKER_CONTEXT defaults to nas-docker)
 set -eu
 cd "$(dirname "$0")/../.."

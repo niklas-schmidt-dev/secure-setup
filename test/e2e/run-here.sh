@@ -1,10 +1,11 @@
 #!/bin/sh
-# End-to-end test of `secure-setup here` on the NAS Docker host: the binary
-# runs INSIDE the throwaway systemd "VPS" (eth0 = internet, eth1 = private
-# network standing in for the tailnet). A client container logs in over the
-# private network to confirm. Covers: login confirmation (automatic and via
-# `secure-setup confirm`), self-check confirmation, the rollback when no login
-# arrives, sshd hardening preconditions, the TUI, and `undo --here`.
+# End-to-end test of `secure-setup here` on a Docker host (the NAS, or the
+# runner in CI): the binary runs INSIDE the throwaway systemd "VPS" (eth0 =
+# internet, eth1 = private network standing in for the tailnet). A client
+# container logs in over the private network to confirm. Covers: login
+# confirmation (automatic and via `secure-setup confirm`), self-check
+# confirmation, the rollback when no login arrives, sshd hardening
+# preconditions, the TUI, and `undo --here`.
 # Usage: test/e2e/run-here.sh       (DOCKER_CONTEXT defaults to nas-docker)
 set -eu
 cd "$(dirname "$0")/../.."
