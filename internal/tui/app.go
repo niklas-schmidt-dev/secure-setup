@@ -201,7 +201,7 @@ func webChoiceFor(f plan.Firewall) string {
 // ---- forms ----
 
 func (m *model) connectForm() *huh.Form {
-	return huh.NewForm(
+	return m.sized(huh.NewForm(
 		huh.NewGroup(
 			huh.NewNote().Title("secure-setup "+m.version).
 				Description("Locks a fresh server down so only you can reach it: SSH over Tailscale, HTTPS only from Cloudflare, nothing else.\nFirst, how do we reach the server today?"),
@@ -223,7 +223,7 @@ func (m *model) connectForm() *huh.Form {
 			huh.NewInput().Title("Password").Description("Used once to log in; your public key is installed and password login is turned off afterwards").
 				EchoMode(huh.EchoModePassword).Value(&m.password).Validate(huh.ValidateNotEmpty()),
 		).WithHideFunc(func() bool { return m.authMethod != "password" }),
-	).WithShowHelp(true)
+	).WithShowHelp(true))
 }
 
 func (m *model) tailscaleForm() *huh.Form {
@@ -249,7 +249,7 @@ func (m *model) tailscaleForm() *huh.Form {
 			Description("Lets tailnet identities log in without keys; your normal SSH keys keep working too.").
 			Affirmative("Yes").Negative("No").Value(&m.tsSSH),
 	}
-	return huh.NewForm(huh.NewGroup(fields...)).WithShowHelp(true)
+	return m.sized(huh.NewForm(huh.NewGroup(fields...)).WithShowHelp(true))
 }
 
 func (m *model) firewallForm() *huh.Form {
@@ -300,17 +300,17 @@ func (m *model) firewallForm() *huh.Form {
 	// Only for the tunnel: the token from the Cloudflare dashboard.
 	tunnel := huh.NewGroup(
 		huh.NewNote().Title("Cloudflare Tunnel").Description("cloudflared connects out to Cloudflare, so no web port is opened. In the Cloudflare dashboard, create a tunnel (Networks > Tunnels). On its install page, copy the command under \"Install as service\" with its copy button and paste it here as it is; the token is taken out of it. The page waits for a connection until this run has connected the tunnel. Then click Next there and route your hostname to the local service (for example http://localhost:8080)."),
-		huh.NewInput().Title("Tunnel token or install command").Description("Leave empty on a rerun to keep the stored token.").
+		huh.NewInput().Title("Tunnel token or install command").Description("The whole \"Install as service\" command (sudo cloudflared service install eyJ...) or just the token. Leave empty on a rerun to keep the stored token.").
 			EchoMode(huh.EchoModePassword).Value(&m.tunnelToken),
 	).WithHideFunc(func() bool { return m.webChoice != "tunnel" })
-	return huh.NewForm(huh.NewGroup(fields...), tunnel, huh.NewGroup(update, reboot)).WithShowHelp(true)
+	return m.sized(huh.NewForm(huh.NewGroup(fields...), tunnel, huh.NewGroup(update, reboot)).WithShowHelp(true))
 }
 
 func (m *model) reviewForm() *huh.Form {
-	return huh.NewForm(huh.NewGroup(
+	return m.sized(huh.NewForm(huh.NewGroup(
 		huh.NewNote().Title("Review").Description(m.summary()),
 		huh.NewConfirm().Title("Apply this setup now?").Affirmative("Apply").Negative("Quit").Value(&m.confirmed),
-	)).WithShowHelp(true)
+	)).WithShowHelp(true))
 }
 
 func (m *model) summary() string {
@@ -446,6 +446,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vp.Height = clamp(m.height-len(m.steps)-12, 4, 30)
 		m.vp.SetContent(strings.Join(m.logs, "\n"))
 		m.vp.GotoBottom()
+		for _, f := range []*huh.Form{m.form, m.promptForm} {
+			if f != nil {
+				m.sized(f)
+			}
+		}
 		return m, nil
 
 	case abortMsg:
@@ -478,13 +483,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.promptOK, m.promptText = false, ""
 		switch msg.kind {
 		case promptConfirm:
-			m.promptForm = huh.NewForm(huh.NewGroup(
+			m.promptForm = m.sized(huh.NewForm(huh.NewGroup(
 				huh.NewConfirm().Title(msg.title).Description(msg.detail).Affirmative("Yes").Negative("No").Value(&m.promptOK),
-			))
+			)))
 		case promptSecret:
-			m.promptForm = huh.NewForm(huh.NewGroup(
+			m.promptForm = m.sized(huh.NewForm(huh.NewGroup(
 				huh.NewInput().Title(msg.title).Description(msg.detail).EchoMode(huh.EchoModePassword).Value(&m.promptText),
-			))
+			)))
 		}
 		return m, m.promptForm.Init()
 
@@ -985,6 +990,14 @@ func orDash(s string) string {
 		return "not running"
 	}
 	return s
+}
+
+// sized hands a form the terminal size. Bubbletea sends it once at the start
+// and on a resize; a form that never gets it neither wraps nor fits, and cuts
+// every description to its first line.
+func (m *model) sized(f *huh.Form) *huh.Form {
+	f.Update(tea.WindowSizeMsg{Width: clamp(m.width-2, 20, 100), Height: max(m.height-4, 8)})
+	return f
 }
 
 func clamp(v, lo, hi int) int {

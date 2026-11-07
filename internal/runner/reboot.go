@@ -134,8 +134,14 @@ func (r *Runner) rebootAndCheck(ctx context.Context, log func(string)) error {
 	// on a connection, ends with it.
 	wctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
+	start, lastNote := time.Now(), time.Now()
 	var last error
 	for {
+		// Refused or timed-out connections log nothing of their own.
+		if time.Since(lastNote) >= 15*time.Second {
+			log(fmt.Sprintf("still waiting for the server: %ds so far, up to 5 minutes", int(time.Since(start).Seconds())))
+			lastNote = time.Now()
+		}
 		if err := sleepCtx(wctx, 5*time.Second); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -153,6 +159,7 @@ func (r *Runner) rebootAndCheck(ctx context.Context, log func(string)) error {
 		if err != nil {
 			last = err
 			log("not back yet: " + shortErr(err))
+			lastNote = time.Now()
 			continue
 		}
 		stop := context.AfterFunc(wctx, func() { c.Close() })
@@ -172,7 +179,7 @@ func (r *Runner) rebootAndCheck(ctx context.Context, log func(string)) error {
 		r.admin = c
 		break
 	}
-	log("the server rebooted and is reachable over the private network again")
+	log(fmt.Sprintf("the server rebooted and is reachable over the private network again (after %s)", time.Since(start).Round(time.Second)))
 	problems, err := checkUntil(ctx, r.admin, expect, time.Minute)
 	if err != nil {
 		return err
