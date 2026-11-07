@@ -253,6 +253,10 @@ non-zero. The server is in its previous state.
        your hostname to the local service (for example
        `http://localhost:8080`).
 
+    What you route is public: scanners find a new hostname within seconds.
+    Put Cloudflare Access (Zero Trust > Access) in front of anything that is
+    only for you.
+
     secure-setup installs cloudflared from Cloudflare's package repository,
     keeps the token in `/etc/secure-setup/cloudflared.token` (mode 0600,
     read with `--token-file`, never on a command line) and runs
