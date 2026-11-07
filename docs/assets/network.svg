@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="440" viewBox="0 0 1000 440" role="img" aria-labelledby="title desc">
+  <title id="title">How traffic reaches your server</title>
+  <desc id="desc">In the default IP-range mode, administrators connect through Tailscale and website visitors reach HTTPS through Cloudflare. Direct public SSH is blocked. The optional Cloudflare Tunnel connects outbound and replaces open web ports. Required network traffic and Tailscale UDP remain allowed.</desc>
+  <defs>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M24 0H0V24" fill="none" stroke="#314e6b" stroke-width=".55"/></pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="m0 0 10 5-10 5z" fill="#94caff"/></marker>
+  </defs>
+  <rect width="1000" height="440" rx="14" fill="#102941"/>
+  <rect width="1000" height="440" rx="14" fill="url(#grid)"/>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="36" y="45" font-size="23" font-weight="600" fill="#edf5ff">How traffic reaches your server</text>
+    <text x="36" y="70" font-size="14" fill="#b8cde4">Default web mode · Cloudflare IP ranges</text>
+    <g fill="#183853" stroke="#54718d" stroke-width="1.3">
+      <rect x="36" y="102" width="210" height="80" rx="8"/>
+      <rect x="354" y="102" width="224" height="80" rx="8"/>
+      <rect x="36" y="218" width="210" height="80" rx="8"/>
+      <rect x="354" y="218" width="224" height="80" rx="8"/>
+      <rect x="718" y="102" width="246" height="196" rx="8"/>
+    </g>
+    <g text-anchor="middle" fill="#edf5ff" font-size="21" font-weight="600">
+      <text x="141" y="136">Your computer</text><text x="466" y="136">Tailscale</text>
+      <text x="141" y="252">Website visitors</text><text x="466" y="252">Cloudflare</text>
+      <text x="841" y="150" font-size="26">Your server</text>
+    </g>
+    <g text-anchor="middle" fill="#c2d6ea" font-size="15">
+      <text x="141" y="161">authorized administrator</text><text x="466" y="161">your private network</text>
+      <text x="141" y="277">public internet</text><text x="466" y="277">proxied DNS</text>
+      <text x="841" y="184">SSH via tailnet</text><text x="841" y="212">HTTPS via Cloudflare</text>
+      <text x="841" y="265" fill="#ffbeb7">× Direct public SSH blocked</text>
+    </g>
+    <g stroke="#94caff" stroke-width="2" marker-end="url(#arrow)">
+      <path d="M246 142h99"/><path d="M578 142h129"/>
+      <path d="M246 258h99"/><path d="M578 258h129"/>
+    </g>
+    <g text-anchor="middle" fill="#b8dbff" font-size="14"><text x="647" y="129">SSH</text><text x="647" y="245">HTTPS</text></g>
+    <path d="M36 326H964" stroke="#42617f"/>
+    <text x="36" y="358" font-size="17" font-weight="600" fill="#edf5ff">Tunnel option</text>
+    <text x="185" y="358" font-size="17" fill="#c2d6ea">Server → Cloudflare (outbound) · no inbound web ports</text>
+    <text x="36" y="405" font-size="14" fill="#b8cde4">Network allowances, including authenticated Tailscale UDP and established traffic, still apply.</text>
+  </g>
+</svg>

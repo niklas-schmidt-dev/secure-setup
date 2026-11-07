@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="300" viewBox="0 0 1000 300" role="img" aria-labelledby="title desc">
+  <title id="title">secure-setup</title>
+  <desc id="desc">Private SSH. Controlled web access. A guided setup for Linux servers using Tailscale, Cloudflare and nftables.</desc>
+  <rect x="1" y="1" width="998" height="298" rx="16" fill="#f6f7f9" stroke="#dfe3e9"/>
+  <g transform="translate(48 38)" fill="none" stroke-width="4.5">
+    <path d="M18 3H6v42h12M37 3h12v42H37" stroke="#172536"/>
+    <path d="M18 24h23m-9-9 9 9-9 9" stroke="#2563eb" stroke-linejoin="round"/>
+  </g>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="116" y="72" font-size="29" font-weight="650" letter-spacing="-1" fill="#172536">secure-setup</text>
+    <text x="48" y="150" font-size="48" font-weight="650" letter-spacing="-1.7" fill="#172536">Private SSH.</text>
+    <text x="48" y="207" font-size="48" font-weight="650" letter-spacing="-1.7" fill="#172536">Controlled web access.</text>
+  </g>
+  <text x="50" y="263" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="13" letter-spacing="1.8" fill="#52657b">TAILSCALE  /  CLOUDFLARE  /  NFTABLES</text>
+</svg>

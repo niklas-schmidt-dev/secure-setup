@@ -1,322 +1,330 @@
-# secure-setup
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/header-dark.svg">
+    <img src="docs/assets/header-light.svg" alt="secure-setup — Private SSH. Controlled web access." width="900">
+  </picture>
+</p>
 
-One command that turns a fresh Linux server into one only you can reach.
+<p align="center">
+  <a href="https://github.com/niklas-schmidt-dev/secure-setup/releases"><img src="https://img.shields.io/github/v/release/niklas-schmidt-dev/secure-setup?color=2563eb" alt="Latest release"></a>
+  <a href="https://github.com/niklas-schmidt-dev/secure-setup/actions/workflows/ci.yml"><img src="https://github.com/niklas-schmidt-dev/secure-setup/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-64748b" alt="MIT license"></a>
+</p>
 
-Run it on the server:
+secure-setup is a guided CLI for restricting access to a fresh Linux server.
+It puts SSH behind Tailscale, limits web access to Cloudflare or a Cloudflare
+Tunnel, and checks the new firewall before keeping it. Run it from your
+computer or directly on the server.
 
-```
-curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh | sh -s -- here
-```
+[Get started](#get-started) · [How it works](#how-it-works) · [Commands](#commands) · [Security](SECURITY.md)
 
-or on your computer, pointing it at the server:
+## What you get
 
-```
+- **Private administration.** Move SSH onto your tailnet and block new SSH
+  connections to the server's public address.
+- **A choice of web access.** Allow web ports only from Cloudflare's published
+  IP ranges, use an outbound Cloudflare Tunnel, or close web access entirely.
+- **A check before changes become permanent.** A rollback timer restores the
+  previous firewall if the new rules are not confirmed in time.
+- **Repeatable setup.** Save the wizard's answers as a JSON plan. Passwords,
+  auth keys and tunnel tokens are excluded from the saved plan.
+
+## Access at a glance
+
+![Administration reaches the server through Tailscale; website visitors reach HTTPS through Cloudflare. Direct public SSH is blocked. Tunnel mode uses an outbound connection instead of inbound web ports.](docs/assets/network.svg)
+
+The diagram shows the default Cloudflare IP-range mode. Your tailnet's access
+policy still controls who can reach private SSH. Required network traffic,
+established connections and authenticated Tailscale UDP are separate firewall
+allowances; see [the complete network policy](docs/networking.md).
+
+## Before you start
+
+For the recommended setup from your computer, have:
+
+- A fresh Linux server running systemd and a supported package manager:
+  apt-get, dnf, yum, pacman or zypper.
+- The server's address, SSH port and credentials. Use root or an account with
+  passwordless sudo. Keep your provider's recovery console available.
+- A macOS or Linux computer connected to the Tailscale network you want the
+  server to join. On Windows, use WSL with working tailnet connectivity.
+- A local SSH key, or access to an SSH agent. The wizard can use a password
+  for the first connection, then install and verify your public key.
+- A Cloudflare-managed hostname if you want to serve a website through
+  Cloudflare. You do not need one when choosing no web traffic.
+
+The wizard proposes system package updates and a reboot by default. Review
+both choices before applying the plan. This tool changes the server's
+firewall and SSH configuration; it is intended for a fresh server.
+
+## Get started
+
+### 1. Start the wizard on your computer
+
+Run this in an interactive terminal on your computer:
+
+```sh
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh)"
 ```
 
-Either way the guided wizard:
+This downloads and runs the installer, which installs the release binary and
+opens the wizard. You can [read the installer](install.sh)
+before running it. Running from your computer lets secure-setup test a new
+private SSH connection and check public SSH from outside the server.
 
-1. updates the system packages first (`apt-get upgrade`, `dnf upgrade`, ...;
-   the wizard asks, yes by default, and says when a reboot is needed)
-2. installs Tailscale and joins your tailnet (auth key or login link; after a
-   login link it checks that the tailnet is yours before going on)
-3. switches SSH to keys only, after installing and verifying your key
-4. installs an nftables firewall: SSH only over the tailnet, HTTPS only from
-   Cloudflare's published ranges (or, for stronger protection, no web port at
-   all behind a Cloudflare Tunnel), everything else dropped
-5. applies the rules with a rollback timer, confirms them over a fresh
-   tailnet connection, and only then makes them permanent
-6. verifies from your machine that a new connection to the public SSH port is
-   blocked
-7. reboots and checks that everything came back on its own: rules loaded,
-   nftables enabled at boot, Tailscale running, sshd keys only, public SSH
-   still blocked (the wizard asks, yes by default; `"reboot": false` in a
-   plan skips it)
+### 2. Connect to the server
 
-If the new rules cannot be confirmed in time (typo in an interface name, tailnet
-down, anything), the server restores its previous firewall by itself. You are
-never locked out.
+![The actual secure-setup connection wizard, showing the example server address 203.0.113.10, SSH port 22, root user and SSH key authentication.](docs/assets/wizard.png)
 
-Works on any VPS or cloud machine running a systemd distribution with
-apt, dnf, yum, pacman or zypper: Hetzner, DigitalOcean, Vultr, Linode, OVH,
-AWS, GCP and so on. Debian, Ubuntu, Fedora, Rocky, Alma, Arch and openSUSE.
+*The real connection screen from a local development build. The example
+address was entered without connecting to a server.*
 
-## Install
+Enter the server's public address, SSH port and user. Choose an SSH key or
+ssh-agent, or use a password for the initial login. For a new host, check the
+host key fingerprint against a trusted source before accepting it.
 
-The install script downloads the release for your OS and architecture from
-GitHub Releases, checks its SHA-256 against `checksums.txt`, puts one static
-binary in `/usr/local/bin` (as root) or `~/.local/bin`, and runs it with the
-arguments you pass. Read it first if you like: it is about 150 lines of POSIX
-sh. Knobs: `SECURE_SETUP_NO_RUN=1` installs without starting anything,
-`SECURE_SETUP_VERSION=v0.2.0` pins a release, `SECURE_SETUP_INSTALL_DIR`
-picks another directory.
+The account must be root or have passwordless sudo. With SSH hardening
+enabled, secure-setup installs and tests your public key before disabling
+password login.
 
-`checksums.txt` comes from the same release page as the archives, so it
-catches a broken download, not a replaced release. Releases after v0.4.0
-also carry signed build provenance: GitHub attests that the release workflow
-built each archive from the tagged commit. When the GitHub CLI (`gh`) is
-installed, the install script checks it and stops if the provenance is
-missing or does not match; `SECURE_SETUP_NO_PROVENANCE=1` skips that, for
-example to install v0.4.0 or older. Without `gh` it says the check did not
-run. To check an archive yourself:
+### 3. Join your tailnet
 
+Choose a name for the server. Provide a Tailscale auth key, or leave the field
+empty and follow the login link. Your computer and the server must be able
+to reach each other through the intended tailnet.
+
+Standard SSH with your key is the default. Tailscale SSH is an optional
+choice that uses your tailnet identity and access policy.
+
+### 4. Choose how web traffic reaches the server
+
+| Mode | Result | What to prepare |
+| --- | --- | --- |
+| Cloudflare IP ranges | HTTPS on port 443 is accepted only from Cloudflare's published ranges. Port 80 is optional. | A proxied DNS record and Full (strict) SSL mode, with an origin certificate that satisfies it. |
+| Cloudflare Tunnel | The server connects out to Cloudflare; no inbound web port is opened. | Create a tunnel and paste its token or service-install command into the wizard. Route the hostname to your service after it connects. |
+| No web traffic | No inbound web port is allowed. | Nothing extra. |
+
+Cloudflare's IP ranges are shared across customers. An IP allowlist alone
+does not identify your zone; see the [security notes](SECURITY.md)
+and [networking guide](docs/networking.md#cloudflare-ip-ranges) for
+origin authentication and the tunnel option.
+
+For a tunnel, follow the [complete tunnel walkthrough](docs/networking.md#cloudflare-tunnel).
+Tunnel hostnames are public unless you protect them. Put Cloudflare Access
+in front of services intended only for you.
+secure-setup configures access to your service; prepare the application, DNS
+record and origin TLS configuration for the web mode you choose.
+
+### 5. Review, apply and verify
+
+Review the selected ports, SSH hardening, updates, reboot and rollback window.
+When you apply the plan, secure-setup validates the rules, arms the rollback
+timer and loads the firewall.
+
+It then opens a fresh SSH connection over the tailnet. After that connection
+confirms the setup, the timer is cancelled and the rules are persisted. It
+also checks that a new connection to public SSH is blocked. If you keep the
+reboot enabled, it reconnects and checks the configuration again after boot.
+
+If confirmation fails before the timer expires, the previous firewall is
+restored. The rollback window does not cover the later reboot. Keep provider
+console access available for boot failures or private-network policy issues.
+
+After setup, connect using the tailnet address shown in the result:
+
+```sh
+ssh YOUR_USER@YOUR_TAILNET_IP
 ```
+
+Replace both placeholders. Add `-p YOUR_SSH_PORT` if you use a non-default port.
+An existing public SSH session may remain open; the relevant check is whether
+a *new* public connection is blocked.
+
+## Other setup paths
+
+### Already logged in to the server?
+
+Run this as root in the server's terminal:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh | sh -s -- here
+```
+
+While the rollback timer is running, log in from another device over the
+tailnet. When using Tailscale SSH, run `secure-setup confirm` in that new
+session. If sudo removes `SSH_CONNECTION`, use
+`sudo --preserve-env=SSH_CONNECTION secure-setup confirm`.
+
+A local run cannot check its own public SSH exposure from outside. Test a new
+connection from another machine:
+
+```sh
+nc -zv YOUR_PUBLIC_IP 22
+```
+
+Replace the address and port. The new connection must fail; also confirm that
+private SSH succeeds. After a local run's reboot, inspect
+`/var/log/secure-setup-bootcheck.log` for the boot check result.
+
+### Automating first boot?
+
+Start with the [cloud-init example](examples/cloud-init.yaml).
+Unattended setup needs a Tailscale auth key and uses self-checks. These cannot
+prove that your tailnet's access policy allows an inbound SSH connection.
+Until setup succeeds, the server keeps the exposure of its provider image.
+Check `/var/log/secure-setup-firstboot.log` and verify access from outside.
+
+<a id="how-the-rollback-works"></a>
+
+## How it works
+
+The default policy moves SSH to `tailscale0`, allows HTTPS only from
+Cloudflare's published ranges, and drops other unsolicited inbound traffic
+except the explicit network allowances below. The tunnel option replaces
+the open web port with an outbound connection.
+
+- Loopback, established and related traffic, required ICMP and DHCP replies
+  are allowed. Ping is optional and rate limited.
+- UDP 41641 stays open for authenticated direct Tailscale connections.
+- Extra private ports are configurable. Outbound traffic is allowed.
+- Docker's own rules remain in place. Forwarded traffic from public uplinks
+  is restricted to Cloudflare on the allowed web ports; private-side traffic
+  is handled separately.
+
+The firewall confirmation flow is:
+
+1. Validate the candidate rules and save the previous firewall state.
+2. Arm a systemd rollback timer for the window selected in the wizard
+   (60 seconds, 2 minutes or 5 minutes).
+3. Apply the new rules atomically.
+4. Confirm new private access, or use the selected local confirmation mode.
+5. Cancel rollback and persist the rules after confirmation.
+
+Preview the rules from a saved plan before applying them:
+
+```sh
+secure-setup render -f plan.json
+```
+
+<a id="use"></a>
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `secure-setup` | Start the remote setup wizard on your computer. |
+| `secure-setup here` | Start the wizard on the Linux server itself. |
+| `secure-setup apply -f plan.json` | Apply a saved plan; add `--yes` for unattended confirmation of prompts. |
+| `secure-setup here -f plan.json` | Apply a saved plan locally. |
+| `secure-setup here --yes` | Run locally with defaults and self-checks. |
+| `secure-setup confirm` | Confirm a waiting local setup from a new private SSH session. |
+| `secure-setup render -f plan.json` | Print the generated nftables ruleset. |
+| `secure-setup undo --host YOUR_TAILNET_IP` | Undo secure-setup's firewall and SSH changes over SSH. |
+| `secure-setup undo --here` | Undo the changes from the server itself. |
+
+The wizard saves remote plans to `~/.config/secure-setup/<host>.json` and local
+plans to `/etc/secure-setup/plan.json`. Edit the target before reusing a remote
+plan on a different server. Non-interactive secrets come from
+`SECURE_SETUP_PASSWORD`, `SECURE_SETUP_PASSPHRASE`, `TS_AUTHKEY` and
+`CLOUDFLARE_TUNNEL_TOKEN`.
+
+See the [plan and configuration reference](docs/reference.md) for replaying
+plans, interface detection and non-interactive options. With remote
+<code>apply --yes</code>, first-seen host keys are accepted automatically;
+changed or invalid known host keys are still refused.
+
+<a id="install"></a>
+
+## Installation details
+
+The installer supports macOS and Linux on amd64 and arm64. It installs into
+`/usr/local/bin` as root or `~/.local/bin` otherwise. If `~/.local/bin` is not
+on your PATH, add it or use the full binary path shown by the installer.
+
+Set `SECURE_SETUP_NO_RUN=1` to install without starting the wizard,
+`SECURE_SETUP_VERSION` to pin a release, or `SECURE_SETUP_INSTALL_DIR` to
+choose the destination. Archives are also available from
+[GitHub Releases](https://github.com/niklas-schmidt-dev/secure-setup/releases).
+
+Downloads are checked against the release's SHA-256 checksums. With a
+compatible GitHub CLI installed, the installer also verifies signed build
+provenance. Without it, provenance is not checked. Checksums from the same
+release detect corruption, not replacement of the release itself. Releases
+through v0.4.0 have no provenance; `SECURE_SETUP_NO_PROVENANCE=1` explicitly
+skips that check.
+
+<details>
+<summary>Verify a release archive manually</summary>
+
+Download the archive and <code>provenance.json</code> from the same release,
+then run:
+
+```sh
 gh attestation verify secure-setup_linux_amd64.tar.gz \
   --repo niklas-schmidt-dev/secure-setup \
-  --signer-workflow niklas-schmidt-dev/secure-setup/.github/workflows/release.yml
+  --signer-workflow niklas-schmidt-dev/secure-setup/.github/workflows/release.yml \
+  --bundle provenance.json
 ```
 
-Without a GitHub login, add `--bundle provenance.json`, downloaded from the
-same release.
+The bundle permits verification without a GitHub login. Use the filename of
+the archive for your platform.
 
-**On the server** (as root, in your first SSH session):
+</details>
 
-```
-curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh | sh -s -- here
-```
+To build and install from source, use the Go version required by
+[go.mod](https://github.com/niklas-schmidt-dev/secure-setup/blob/main/go.mod)
+(currently Go 1.27.3 or newer):
 
-**On your computer**, to set a server up over SSH:
-
-```
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/main/install.sh)"
+```sh
+go install github.com/niklas-schmidt-dev/secure-setup@latest
 ```
 
-**Unattended at first boot**: see [examples/cloud-init.yaml](examples/cloud-init.yaml).
-It runs as soon as cloud-init reaches its final stage and needs a Tailscale
-auth key: an unattended run refuses the login link, because nobody is there
-to open it and anyone who reads the pending link could claim the server. Until the new rules are live (a few minutes) the server is as
-reachable as the provider image makes it, and if the run fails it stays
-that way, so check `/var/log/secure-setup-firstboot.log` or test the public
-port from outside before you rely on it. Pair it with a provider firewall
-if the server must never be reachable at all.
+## Recovery and limits
 
-Other ways:
+Rollback covers the firewall confirmation window, not the subsequent reboot
+or every change made during setup. It does not revert package upgrades.
+Unattended self-checks do not prove inbound tailnet access. Keep your provider
+console available if a boot check or private login fails.
 
-```
-go install github.com/niklas-schmidt-dev/secure-setup@latest   # needs Go 1.27+
-```
+`undo` removes secure-setup's firewall, timers and SSH hardening changes and
+leaves Tailscale installed. It can make the server publicly reachable again.
+Review its prompt before continuing. A previously retired ufw is re-enabled;
+firewalld is unmasked but must be started manually.
 
-or download an archive from the Releases page. Windows: use WSL.
+For the detailed threat model and private vulnerability reporting, read
+[SECURITY.md](SECURITY.md).
 
-Other ways: `go install github.com/niklas-schmidt-dev/secure-setup@latest`
-(Go 1.27+), or an archive from the Releases page. Windows: use WSL.
+For confirmation modes, boot-check logs and recovery commands, see the
+[recovery guide](docs/recovery.md).
 
-## Use
+<a id="things-worth-knowing"></a>
 
-On the server itself:
+## Documentation
 
-```
-secure-setup here                  guided setup of this machine (TUI)
-secure-setup here --yes            no questions: defaults, confirmed by self-checks
-secure-setup here -f plan.json     run a saved plan on this machine
-secure-setup confirm               in a new tailnet session: confirm a waiting setup
-secure-setup undo --here           remove it from this machine again
-```
+| Guide | What it covers |
+| --- | --- |
+| [Networking](docs/networking.md) | Cloudflare IP ranges and tunnels, Docker, Tailscale SSH and existing private networks. |
+| [Reference](docs/reference.md) | Saved plans, environment variables, supported platforms and server changes. |
+| [Recovery](docs/recovery.md) | Confirmation modes, rollback, reboot checks and undo. |
+| [Security](SECURITY.md) | Threat model, release provenance and private vulnerability reporting. |
+| [Cloud-init example](examples/cloud-init.yaml) | Unattended first-boot setup. |
 
-From your computer:
+### What ends up on the server
 
-```
-secure-setup                       guided setup of a server over SSH (TUI)
-secure-setup apply -f plan.json    replay a saved plan, no questions asked with --yes
-secure-setup undo --host ADDR      remove the firewall, timers and sshd change again
-secure-setup render -f plan.json   print the nftables ruleset a plan produces
-```
-
-The wizard saves its answers (without secrets) to
-`~/.config/secure-setup/<host>.json`, or `/etc/secure-setup/plan.json` on the
-server. Replaying that file sets up the next server the same way. The
-internet interface is detected on each server and not saved; a
-`wan_interface` you put in a plan must exist on the target, and if it differs
-from the interface of the default route the run stops unless the plan also
-sets `"wan_interface_override": true`:
-
-```
-TS_AUTHKEY=tskey-auth-... secure-setup apply -f ~/.config/secure-setup/vps.json --yes
-```
-
-Secrets come from the environment in non-interactive mode:
-`SECURE_SETUP_PASSWORD`, `SECURE_SETUP_PASSPHRASE`, `TS_AUTHKEY`.
-
-### On the server or from your computer?
-
-Both do the same work and both are protected by the rollback timer. They
-differ in who proves that the new rules let you in:
-
-- **From your computer**, secure-setup opens a brand-new SSH connection over
-  the tailnet after the rules go live, and afterwards proves from the outside
-  that the public port is closed. Your key is installed and tested before
-  password login is turned off. The strongest proof, and nothing to type on
-  the server.
-- **On the server** (`here`), it asks you to log in once more from another
-  device over the tailnet while the timer runs. Only a connection that came
-  in through the new admin rule counts (its packet counter must move), from
-  a machine other than this one, either as a visible session or as an
-  "Accepted" line sshd itself wrote to the journal; with Tailscale SSH, run
-  `secure-setup confirm` in the new session. Password login is only turned
-  off when `authorized_keys` holds a key sshd would accept for your account
-  (read as that account, no restricting options), or when this run turns
-  Tailscale SSH on; if the run then fails or rolls back, password login is
-  turned back on. It cannot test its own public port from inside, so do that
-  once from outside: `nc -zv <public ip> 22` must fail.
-- **Unattended** (`here --yes`, cloud-init), nobody can log in during the
-  run, so it confirms itself: the admin rule is loaded, a root-owned sshd
-  socket listens on the tailnet address, Tailscale is running and online, and
-  an online tailnet peer, if there is one, answers a `tailscale ping`. The
-  ping is an outbound probe; it does not exercise the admin rule. What it
-  cannot see is your tailnet ACL. If that blocks SSH to the new node, fix the
-  ACL; the server is intact and the provider console remains the back door.
-
-The reboot at the end is the real test of what was made permanent. From your
-computer secure-setup waits for the server to come back over the tailnet and
-checks it again; on the server itself it cannot watch its own reboot, so a
-one-shot service does the same checks after the boot and leaves the result in
-the log and the login message. The rollback timer no longer covers this
-step: if something did not come back, use the provider console.
-
-## What ends up on the server
-
-| Path | Purpose |
-|---|---|
-| `/etc/nftables.conf` | the ruleset, loaded by `nftables.service` at boot (a previous file is kept as `.secure-setup.bak`); where the unit loads another file, such as `/etc/sysconfig/nftables.conf` on Fedora and RHEL, that file gets an `include` of it. A system whose `nftables.service` loads no file is refused before any rule goes live |
-| `/etc/secure-setup/cloudflare.nft` | Cloudflare IPv4 and IPv6 ranges, included by the ruleset |
-| `/usr/local/sbin/secure-setup-cloudflare-sync` | refreshes the ranges; run daily by `secure-setup-cloudflare-sync.timer` |
-| `/etc/ssh/sshd_config.d/00-secure-setup.conf` | password login off, root login with keys only |
-| `/var/lib/secure-setup/` | rollback script and the previous ruleset; `rolled-back` appears if a rollback ever fired |
-| `/etc/secure-setup/plan.json` | the answers of a `here` run, for `secure-setup here -f` next time |
-| `secure-setup-bootcheck.service` | after a `here` run's reboot: checks the lockdown once, writes `/var/log/secure-setup-bootcheck.log` and `/etc/motd.d/secure-setup` (shown at login), then disables itself |
-
-ufw or firewalld, when active, keep running until the new rules go live under
-the rollback timer; a rollback starts them again. ufw's rules are only
-stopped then (`ufw-init stop`), so it stays enabled at boot until the
-confirmation. Only after confirmation is ufw disabled and firewalld disabled
-and masked (also when it was enabled at
-boot but not running, so it cannot replace the rules at the next boot).
-sshd hardening never loosens a stricter `PermitRootLogin` (`no`,
-`forced-commands-only`), and is reverted when sshd's effective policy, Match
-blocks included, still allows passwords.
-
-The ruleset in words:
-
-- inbound default: drop
-- loopback, established and related connections, the ICMP types networks need, DHCP replies: accept
-- ping: accept with a rate limit (optional)
-- UDP 41641 from anywhere: accept (direct Tailscale connections; authenticated WireGuard)
-- SSH and any extra ports you chose, only on `tailscale0`: accept (with a counter: `nft list chain inet secure_setup input` shows how many connections came in this way)
-- TCP 443 (and 80 if chosen), only from Cloudflare's ranges: accept
-- forwarded traffic (Docker, VMs): allowed from inside, allowed from the internet only through Cloudflare on the web ports. "The internet" is every interface with a default route, IPv4 or IPv6, and every network card with a public address, such as a second public NIC without a default route; traffic arriving on anything else (Docker and VM bridges, VPN and tunnel devices, private networks) counts as inside
-- outbound: allowed
-
-See it for yourself before applying: `secure-setup render`.
-
-## How the rollback works
-
-1. The new ruleset is validated with `nft -c` and the current table is saved.
-2. A transient systemd timer is armed: `secure-setup-rollback` fires after your
-   chosen window (60 s to 5 min).
-3. The rules are loaded atomically.
-4. secure-setup opens a brand-new SSH connection over the tailnet. New, because
-   the old connection would survive anyway as an established flow. (On the
-   server, it waits for your login from another device instead, or runs the
-   self-checks in unattended mode.)
-5. Over that connection it cancels the timer, persists the ruleset and enables
-   the services.
-
-If step 4 fails, the timer runs `/var/lib/secure-setup/rollback.sh`, which
-restores the saved table (or removes the new one) and writes
-`/var/lib/secure-setup/rolled-back`. secure-setup reports that and exits
-non-zero. The server is in its previous state.
-
-## Things worth knowing
-
-- **Your existing SSH session stays up** while the firewall changes. That is
-  conntrack keeping an established flow. A new connection to the public port
-  is what gets blocked, and that is what the final step tests.
-- **Web traffic, two levels**:
-  - *Cloudflare's IP ranges* (default): TCP 443 (and 80 if chosen) is open
-    only to Cloudflare. Cloudflare must proxy your DNS record (orange cloud);
-    set the SSL mode to Full (strict). The ranges are shared by every
-    Cloudflare customer, so consider Authenticated Origin Pulls so only your
-    zone's traffic reaches the origin.
-  - *Cloudflare Tunnel* (stronger protection): no web port is opened at all.
-    cloudflared connects out to Cloudflare and brings your traffic in through
-    that connection. In the Cloudflare dashboard:
-    1. Create a tunnel (Networks > Tunnels, type Cloudflared). Its install
-       page shows commands for each system; which one you pick does not
-       matter, and you do not run any of them yourself.
-    2. Copy the command under "Install as service" with its copy button
-       (`sudo cloudflared service install eyJ...`) and paste it as it is: in
-       the wizard, or as `CLOUDFLARE_TUNNEL_TOKEN` with
-       `"cloudflare_tunnel": true` in a plan. secure-setup takes the token
-       out of it; the bare token works too.
-    3. The page says it is waiting for a connection, and Next stays disabled,
-       until secure-setup has connected the tunnel. Then click Next and route
-       your hostname to the local service (for example
-       `http://localhost:8080`).
-
-    What you route is public: scanners find a new hostname within seconds.
-    Put Cloudflare Access (Zero Trust > Access) in front of anything that is
-    only for you.
-
-    secure-setup installs cloudflared from Cloudflare's package repository,
-    keeps the token in `/etc/secure-setup/cloudflared.token` (mode 0600,
-    read with `--token-file`, never on a command line) and runs
-    `secure-setup-cloudflared.service`. The run only goes on to the firewall
-    once the tunnel is connected, and the reboot check expects it to
-    reconnect.
-- **Docker**: containers can reach out as usual. Published ports are reachable
-  from the tailnet and, from the internet, only through Cloudflare on the web
-  ports. Docker's own iptables rules stay; both rulesets must accept a packet.
-- **Tailscale SSH** (optional): logs you in with your tailnet identity instead
-  of keys. While it is on, tailscaled answers port 22 on the tailnet address
-  instead of sshd, so logins there follow your tailnet policy. It is switched
-  on with `tailscale set --ssh` only once the tailnet is known to be yours.
-  From your computer it is the last step, after every check against sshd,
-  and a fresh login through it must work (a browser check your policy asks
-  for is shown); otherwise it is switched off again and sshd with your key
-  stays in charge. On a rerun it is paused during the run.
-- **Non-Tailscale private networks**: set `use_existing_network`,
-  `admin_address` and `admin_interface` in the plan file to use a provider
-  private network or a WireGuard peer instead. Tailscale is then not installed.
-- **Undo** restores the old state but leaves Tailscale installed. It
-  re-enables a ufw that secure-setup retired and unmasks firewalld (start it
-  again yourself, it conflicts with `nftables.service`).
-- Debian's `nftables.service` flushes the ruleset when stopped. Reload with
-  `nft -f /etc/nftables.conf`; do not stop the service on a live box.
+secure-setup installs an nftables ruleset, an SSH configuration drop-in and
+the services needed by your selected setup. The [server file and service
+inventory](docs/reference.md#what-ends-up-on-the-server) lists their paths,
+backups and interaction with ufw or firewalld.
 
 ## Development
 
-```
-go test ./...                    unit tests (ruleset generator, parsers, plan, sessions)
-scripts/validate-ruleset.sh      rulesets and scripts against a real nft binary (Docker)
-test/e2e/run.sh                  full run from a client container against a throwaway systemd server (Docker)
-test/e2e/run-here.sh             full run of `here` inside that server: login, confirm, self-check, rollback, TUI, undo
-```
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) for the repository layout,
+unit tests, real-nft validation and the disposable Debian end-to-end tests.
+The e2e environment exercises both setup modes and forced rollback; it is
+not a test matrix for every supported distribution or cloud provider.
 
-The end-to-end tests build a Debian container with systemd and sshd on two
-networks (a "public" and a "private" one standing in for the tailnet), lock
-it down, prove the public port is closed, force a lockout to watch the
-rollback fire, and run `undo`. Docker commands use `DOCKER_CONTEXT` (default
-`nas-docker`). CI runs all three on every pull request, on the runner's own
-Docker (`DOCKER_CONTEXT=default`). The e2e networks use `10.250.100.0/24` and
-`10.250.101.0/24`; override with `E2E_SUBNET_PUBLIC` and `E2E_SUBNET_PRIVATE`.
-They need Docker 28 or newer. Build the images first:
+For a vulnerability, use [private reporting](SECURITY.md#reporting-a-vulnerability).
 
-```
-docker build -t secure-setup-e2e-server -f test/e2e/Dockerfile.server test/e2e
-docker build -t secure-setup-e2e-client -f test/e2e/Dockerfile.client test/e2e
-```
+## License
 
-Layout:
-
-```
-main.go                 commands: wizard, here, confirm, apply, render, undo
-internal/tui            the wizard (bubbletea + huh)
-internal/textui         plain-text reporter and prompts for apply/undo
-internal/runner         the steps: over SSH (runner.go) and on the machine itself (here.go)
-internal/remote         what runs on the server, with the embedded scripts and units
-internal/localhost      runs those steps on this machine (`here`)
-internal/sshx           SSH client: keys, agent, password, known_hosts
-internal/nftgen         nftables ruleset template and renderer
-internal/cloudflare     fetches and validates Cloudflare's ranges
-internal/plan           the plan file
-```
+[MIT](LICENSE) · Niklas Schmidt
