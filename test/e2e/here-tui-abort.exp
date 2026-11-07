@@ -7,8 +7,10 @@ set prv [string map {. {\.}} $env(E2E_PRIVATE_IP)]
 log_user 1
 spawn secure-setup here -f /root/plan-login.json
 stty rows 40 columns 120 < $spawn_out(slave,name)
+# The first field of the firewall page: the note above it scrolls away when
+# the page is taller than the terminal.
 expect {
-  -re {Firewall} { puts "\nWALK: firewall screen" }
+  -re {Web traffic} { puts "\nWALK: firewall screen" }
   timeout { puts "\nWALK: FAIL no firewall screen"; exit 1 }
 }
 foreach i {1 2 3 4 5 6 7 8} { sleep 0.4; send "\r" }
