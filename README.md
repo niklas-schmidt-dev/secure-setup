@@ -295,7 +295,7 @@ rollback fire, and run `undo`. Docker commands use `DOCKER_CONTEXT` (default
 `nas-docker`). CI runs all three on every pull request, on the runner's own
 Docker (`DOCKER_CONTEXT=default`). The e2e networks use `10.250.100.0/24` and
 `10.250.101.0/24`; override with `E2E_SUBNET_PUBLIC` and `E2E_SUBNET_PRIVATE`.
-Build the images first:
+They need Docker 28 or newer. Build the images first:
 
 ```
 docker build -t secure-setup-e2e-server -f test/e2e/Dockerfile.server test/e2e
