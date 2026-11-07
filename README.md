@@ -239,14 +239,23 @@ non-zero. The server is in its previous state.
     zone's traffic reaches the origin.
   - *Cloudflare Tunnel* (stronger protection): no web port is opened at all.
     cloudflared connects out to Cloudflare and brings your traffic in through
-    that connection. Create a tunnel in the Cloudflare dashboard (Networks >
-    Tunnels), route your hostname to the local service there (for example
-    `http://localhost:8080`), and give secure-setup the token from its
-    install command: in the wizard, or as `CLOUDFLARE_TUNNEL_TOKEN` with
-    `"cloudflare_tunnel": true` in a plan. secure-setup installs cloudflared
-    from Cloudflare's package repository, keeps the token in
-    `/etc/secure-setup/cloudflared.token` (mode 0600, read with
-    `--token-file`, never on a command line) and runs
+    that connection. In the Cloudflare dashboard:
+    1. Create a tunnel (Networks > Tunnels, type Cloudflared). Its install
+       page shows commands for each system; which one you pick does not
+       matter, and you do not run any of them yourself.
+    2. Copy the command under "Install as service" with its copy button
+       (`sudo cloudflared service install eyJ...`) and paste it as it is: in
+       the wizard, or as `CLOUDFLARE_TUNNEL_TOKEN` with
+       `"cloudflare_tunnel": true` in a plan. secure-setup takes the token
+       out of it; the bare token works too.
+    3. The page says it is waiting for a connection, and Next stays disabled,
+       until secure-setup has connected the tunnel. Then click Next and route
+       your hostname to the local service (for example
+       `http://localhost:8080`).
+
+    secure-setup installs cloudflared from Cloudflare's package repository,
+    keeps the token in `/etc/secure-setup/cloudflared.token` (mode 0600,
+    read with `--token-file`, never on a command line) and runs
     `secure-setup-cloudflared.service`. The run only goes on to the firewall
     once the tunnel is connected, and the reboot check expects it to
     reconnect.

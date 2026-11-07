@@ -97,7 +97,7 @@ func SetupTunnel(ctx context.Context, c Host, token string, onLine func(string))
 		}
 		onLine("stored the tunnel token in " + TunnelTokenPath + " (mode 0600)")
 	} else if _, err := c.Output(ctx, "test -s "+TunnelTokenPath); err != nil {
-		return fmt.Errorf("no Cloudflare Tunnel token: set CLOUDFLARE_TUNNEL_TOKEN (Cloudflare dashboard > Networks > Tunnels > your tunnel > install command)")
+		return fmt.Errorf("no Cloudflare Tunnel token: set CLOUDFLARE_TUNNEL_TOKEN to the \"Install as service\" command of your tunnel (Cloudflare dashboard > Networks > Tunnels), as it is or just its token")
 	}
 	bin, err := c.Output(ctx, "command -v cloudflared")
 	bin = strings.TrimSpace(bin)
