@@ -141,6 +141,25 @@ func TestDetectListsEveryDefaultRouteDevice(t *testing.T) {
 	}
 }
 
+// A network card with a public address faces the internet even without a
+// default route; private, shared (CGNAT, Tailscale) and ULA addresses do not.
+func TestDetectFindsPublicNICs(t *testing.T) {
+	out := "SYSTEMD=1\nWAN=eth0\nWANS=eth0 \nNICADDRS=" +
+		"eth0 203.0.113.10/24 eth0 2001:db8::10/64 " +
+		"ens10 10.0.0.2/32 eth2 100.101.102.103/32 eth3 fd00::5/64 eth4 169.254.0.9/16 " +
+		"eth1 2001:db8:1::7/64 eth5 198.51.100.7/24 \n"
+	f, err := Detect(context.Background(), &recordHost{stdout: func(string) string { return out }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"eth0", "eth1", "eth5"}; !slices.Equal(f.PublicNICs, want) {
+		t.Fatalf("PublicNICs %q, want %q", f.PublicNICs, want)
+	}
+	if !strings.Contains(detectScript, `/sys/class/net/$dev/device`) {
+		t.Fatal("detect does not limit public addresses to network cards")
+	}
+}
+
 // HardenSSHD keeps a stricter root-login policy.
 func TestHardenKeepsStricterPermitRootLogin(t *testing.T) {
 	for cur, want := range map[string]string{"no": "PermitRootLogin no", "forced-commands-only": "PermitRootLogin forced-commands-only", "yes": "PermitRootLogin prohibit-password", "without-password": "PermitRootLogin prohibit-password"} {
