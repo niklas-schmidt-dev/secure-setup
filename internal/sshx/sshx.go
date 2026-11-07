@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -204,23 +205,64 @@ func (c *Client) wrap(cmd string) string {
 	return cmd
 }
 
+// MaxOutput bounds what one command may print on stdout or stderr before it
+// is stopped: far more than any command secure-setup runs prints, and little
+// enough that a server cannot fill this computer's memory.
+const MaxOutput = 16 << 20
+
+// ErrOutputTooLarge means a command printed more than MaxOutput, or a line
+// longer than its streaming limit.
+var ErrOutputTooLarge = errors.New("the server sent more output than secure-setup accepts")
+
 func (c *Client) run(ctx context.Context, cmd string, stdin io.Reader) (stdout, stderr string, err error) {
 	sess, err := c.conn.NewSession()
 	if err != nil {
 		return "", "", fmt.Errorf("open session: %w", err)
 	}
 	defer sess.Close()
-	var out, errb bytes.Buffer
-	sess.Stdout, sess.Stderr, sess.Stdin = &out, &errb, stdin
+	full := make(chan struct{})
+	var once sync.Once
+	out := &cappedBuffer{max: MaxOutput, full: func() { once.Do(func() { close(full) }) }}
+	errb := &cappedBuffer{max: MaxOutput, full: out.full}
+	sess.Stdout, sess.Stderr, sess.Stdin = out, errb, stdin
 	done := make(chan error, 1)
 	go func() { done <- sess.Run(cmd) }()
 	select {
 	case <-ctx.Done():
 		_ = sess.Signal(ssh.SIGKILL)
 		return out.String(), errb.String(), ctx.Err()
+	case <-full:
+		// Nothing reads the session any more, so it would never end.
+		_ = sess.Signal(ssh.SIGKILL)
+		_ = sess.Close()
+		return "", "", fmt.Errorf("%w (%d MiB)", ErrOutputTooLarge, MaxOutput>>20)
 	case err := <-done:
 		return out.String(), errb.String(), err
 	}
+}
+
+// cappedBuffer keeps up to max bytes. A write past that fails and calls full.
+type cappedBuffer struct {
+	mu   sync.Mutex
+	buf  bytes.Buffer
+	max  int
+	full func()
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.buf.Len()+len(p) > b.max {
+		b.full()
+		return 0, ErrOutputTooLarge
+	}
+	return b.buf.Write(p)
+}
+
+func (b *cappedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func (c *Client) stream(ctx context.Context, cmd string, onLine func(string)) error {
@@ -254,7 +296,7 @@ func (c *Client) stream(ctx context.Context, cmd string, onLine func(string)) er
 
 	recent := newRing(15)
 	sc := bufio.NewScanner(pr)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), maxLine)
 	sc.Split(scanLines)
 	for sc.Scan() {
 		line := strings.TrimRight(sc.Text(), " \t")
@@ -265,6 +307,17 @@ func (c *Client) stream(ctx context.Context, cmd string, onLine func(string)) er
 		if onLine != nil {
 			onLine(line)
 		}
+	}
+	if serr := sc.Err(); serr != nil {
+		// Nothing reads the pipe any more, so the session would never end:
+		// stop it instead of waiting for it.
+		_ = sess.Signal(ssh.SIGKILL)
+		_ = sess.Close()
+		pr.CloseWithError(serr)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("remote command stopped: %w (a line longer than %d KiB)\n%s", ErrOutputTooLarge, maxLine>>10, recent.String())
 	}
 	err = <-waitErr
 	if ctx.Err() != nil {
@@ -328,6 +381,9 @@ func tailOf(stderr string) string {
 	return "\n" + strings.Join(lines, "\n")
 }
 
+// maxLine is the longest line a streamed command may print.
+const maxLine = 1024 * 1024
+
 type ring struct {
 	lines []string
 	n     int
@@ -335,7 +391,11 @@ type ring struct {
 
 func newRing(n int) *ring { return &ring{n: n} }
 
+// add keeps s for an error message, cut to 500 bytes.
 func (r *ring) add(s string) {
+	if len(s) > 500 {
+		s = strings.ToValidUTF8(s[:500], "") + "..."
+	}
 	r.lines = append(r.lines, s)
 	if len(r.lines) > r.n {
 		r.lines = r.lines[1:]

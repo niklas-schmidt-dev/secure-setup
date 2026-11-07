@@ -25,3 +25,16 @@ func TestSummaryHighlightSurvivesCleaning(t *testing.T) {
 		t.Fatalf("server control characters reached the summary: %q", out)
 	}
 }
+
+// Public SSH is called blocked only when a fresh connection showed it; an
+// untested one says why instead of claiming it.
+func TestSummaryPublicSSH(t *testing.T) {
+	p := plan.Default()
+	if out := Summary(&p, &runner.Result{PublicSSHClosed: true}); !strings.Contains(out, "blocked (verified") {
+		t.Fatalf("verified block not shown: %q", out)
+	}
+	out := Summary(&p, &runner.Result{PublicSSHNote: "not tested: could not be tried from here"})
+	if strings.Contains(out, "blocked") || strings.Contains(out, "still reachable") || !strings.Contains(out, "not tested: could not be tried from here") {
+		t.Fatalf("untested public SSH: %q", out)
+	}
+}

@@ -761,15 +761,23 @@ func (m *model) applyEvent(e runner.Event) {
 	case runner.Log:
 		m.addLog(e.Text)
 	case runner.Attention:
-		m.attention = append(m.attention, e.Text)
+		// Only the latest is shown; keep a few, each at most a screenful.
+		m.attention = append(m.attention, cut(e.Text, 4000))
+		if len(m.attention) > 10 {
+			m.attention = m.attention[len(m.attention)-10:]
+		}
 		m.addLog("! " + strings.ReplaceAll(e.Text, "\n", " "))
 	case runner.StepFailed:
 		m.addLog(errStyle.Render("error: ") + e.Text)
 	}
 }
 
+// maxLogLine is the longest log line the run screen keeps; output lines from
+// the server can be up to a megabyte long.
+const maxLogLine = 1000
+
 func (m *model) addLog(line string) {
-	m.logs = append(m.logs, line)
+	m.logs = append(m.logs, cut(line, maxLogLine))
 	if len(m.logs) > 400 {
 		m.logs = m.logs[len(m.logs)-400:]
 	}
@@ -945,7 +953,7 @@ func Summary(p *plan.Plan, r *runner.Result) string {
 	case r.PublicSSHClosed:
 		line("Public SSH", "blocked (verified with a fresh connection from here)")
 	default:
-		warn("Public SSH", "still reachable: "+r.PublicSSHNote)
+		warn("Public SSH", r.PublicSSHNote)
 	}
 	if r.Hardened {
 		line("Password login", "disabled; keys only")
@@ -976,6 +984,14 @@ func Summary(p *plan.Plan, r *runner.Result) string {
 		line("Undo everything", fmt.Sprintf("secure-setup undo --host %s --user %s", r.AdminAddress, user))
 	}
 	return b.String()
+}
+
+// cut shortens s to at most n bytes, on a character boundary.
+func cut(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return strings.ToValidUTF8(s[:n], "") + "..."
 }
 
 func yesNo(b bool) string {

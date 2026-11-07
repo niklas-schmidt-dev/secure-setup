@@ -10,7 +10,10 @@ server. Edit the target address before replaying a remote plan on another
 server. The internet interface is detected on each server and not saved; a
 `wan_interface` you put in a plan must exist on the target, and if it differs
 from the interface of the default route the run stops unless the plan also
-sets `"wan_interface_override": true`:
+sets `"wan_interface_override": true`. Further internet-facing interfaces
+that detection cannot recognise go into `extra_wan_interfaces` (see
+[Docker and forwarded traffic](networking.md#docker-and-forwarded-traffic)).
+Replay a saved plan with:
 
 ```sh
 secure-setup apply -f ~/.config/secure-setup/vps.json --yes
@@ -54,7 +57,7 @@ wizard, not from the JSON file.
 | `/etc/secure-setup/cloudflare.nft` | Cloudflare IPv4 and IPv6 ranges, included by the ruleset |
 | `/usr/local/sbin/secure-setup-cloudflare-sync` | refreshes the ranges; run daily by `secure-setup-cloudflare-sync.timer` |
 | `/etc/ssh/sshd_config.d/00-secure-setup.conf` | password login off, root login with keys only |
-| `/var/lib/secure-setup/` | rollback script and the previous ruleset; `rolled-back` appears if a rollback ever fired |
+| `/var/lib/secure-setup/` | rollback script and the previous ruleset; `decided` once the confirmation or the rollback timer claimed an apply's outcome; `rolled-back` appears if a rollback ever fired |
 | `/etc/secure-setup/plan.json` | the answers of a `here` run, for `secure-setup here -f` next time |
 | `/etc/secure-setup/cloudflared.token` | optional Cloudflare Tunnel token, mode 0600, read by cloudflared through `--token-file` |
 | `secure-setup-cloudflared.service` | optional outbound tunnel; connects before the firewall is applied and is checked again after reboot |

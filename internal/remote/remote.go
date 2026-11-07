@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -102,7 +103,8 @@ printf 'WAN6=%s\n' "$(ip -o -6 route show default 2>/dev/null | awk '{for(i=1;i<
 printf 'WANS=%s\n' "$({ ip -o -4 route show default; ip -o -6 route show default; } 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); break}}' | tr '\n' ' ')"
 wan=$(ip -o -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
 if [ -n "$wan" ]; then printf 'WANIP=%s\n' "$(ip -o -4 addr show dev "$wan" 2>/dev/null | awk '{print $4; exit}' | cut -d/ -f1)"; fi
-printf 'NICADDRS=%s\n' "$(ip -o addr show scope global 2>/dev/null | while read -r _ dev _ addr _; do if [ -e "/sys/class/net/$dev/device" ]; then printf '%s %s ' "$dev" "$addr"; fi; done)"
+sysnet=/sys/class/net
+` + onCardScript + `printf 'NICADDRS=%s\n' "$(ip -o addr show scope global 2>/dev/null | while read -r _ dev _ addr _; do dev=${dev%%@*}; if oncard "$dev" 0; then printf '%s %s ' "$dev" "$addr"; fi; done)"
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then echo UFW=1; else echo UFW=0; fi
 if systemctl is-active --quiet firewalld 2>/dev/null; then echo FIREWALLD=1; else echo FIREWALLD=0; fi
 if systemctl is-enabled --quiet firewalld 2>/dev/null; then echo FIREWALLD_ENABLED=1; else echo FIREWALLD_ENABLED=0; fi
@@ -111,12 +113,31 @@ if [ -f /var/lib/secure-setup/rolled-back ]; then printf 'ROLLED_BACK=%s\n' "$(c
 if systemctl is-active --quiet secure-setup-rollback.timer 2>/dev/null; then echo ROLLBACK_ARMED=1; fi
 `
 
-// Detect gathers Facts about the server.
+// onCardScript defines `oncard DEV DEPTH`: true when DEV is a network card
+// (it has $sysnet/DEV/device) or sits on one, such as a VLAN, bond, bridge or
+// macvlan over a card, followed through its lower_* links up to four levels.
+// Docker and VM bridges sit on veth and tap devices, which are not cards.
+const onCardScript = `oncard() {
+	[ -e "$sysnet/$1/device" ] && return 0
+	[ "$2" -lt 4 ] || return 1
+	for l in "$sysnet/$1"/lower_*; do
+		[ -e "$l" ] && oncard "${l##*/lower_}" $(($2 + 1)) && return 0
+	done
+	return 1
+}
+`
+
+// detectKeys are the facts detectScript prints. Other lines are ignored, so
+// a server cannot fill the map with keys of its own.
+var detectKeys = []string{"ID", "ID_LIKE", "CODENAME", "PRETTY", "HOSTNAME", "SYSTEMD", "PKG", "NFT", "TAILSCALE", "DOCKER", "SSHPORT", "WAN", "WAN6", "WANS", "WANIP", "NICADDRS", "UFW", "FIREWALLD", "FIREWALLD_ENABLED", "SS_TABLE", "ROLLED_BACK", "ROLLBACK_ARMED"}
+
+// Detect gathers Facts about the server. Their text is shown in the wizard's
+// forms, so control characters are replaced (see Printable).
 func Detect(ctx context.Context, c Host) (*Facts, error) {
 	kv := map[string]string{}
 	err := c.Script(ctx, detectScript, func(line string) {
-		if k, v, ok := strings.Cut(line, "="); ok {
-			kv[k] = v
+		if k, v, ok := strings.Cut(line, "="); ok && slices.Contains(detectKeys, k) {
+			kv[k] = Printable(v)
 		}
 	})
 	if err != nil {
@@ -160,10 +181,10 @@ func Detect(ctx context.Context, c Host) (*Facts, error) {
 	}
 	if f.Tailscale {
 		if st, err := TailscaleStatus(ctx, c); err == nil {
-			f.TailscaleState = st.BackendState
+			f.TailscaleState = Printable(st.BackendState)
 			for _, ip := range st.Self.TailscaleIPs {
 				if !strings.Contains(ip, ":") {
-					f.TailscaleIPv4 = ip
+					f.TailscaleIPv4 = Printable(ip)
 					break
 				}
 			}
@@ -173,10 +194,10 @@ func Detect(ctx context.Context, c Host) (*Facts, error) {
 }
 
 // publicNICs picks the network cards that carry a public address from pairs
-// of device and address. A second uplink without a default route is still
-// on the internet. Bridges, veths, VPN and tunnel devices are not cards
-// (no /sys/class/net/DEV/device), so container and VM traffic stays inside
-// even on a public prefix.
+// of device and address (detect lists cards and the VLANs, bonds and bridges
+// on top of them). A second uplink without a default route is still on the
+// internet. Docker and VM bridges, veths, VPN and tunnel devices are not on a
+// card, so container and VM traffic stays inside even on a public prefix.
 func publicNICs(pairs []string) []string {
 	var out []string
 	for i := 0; i+1 < len(pairs); i += 2 {
@@ -188,6 +209,17 @@ func publicNICs(pairs []string) []string {
 		out = append(out, dev)
 	}
 	return out
+}
+
+// Printable replaces control characters other than newline and tab, so text
+// that came from the server cannot drive the operator's terminal.
+func Printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || !unicode.IsControl(r) {
+			return r
+		}
+		return '?'
+	}, s)
 }
 
 // sharedSpace is 100.64.0.0/10: carrier-grade NAT, and Tailscale's IPv4 range.

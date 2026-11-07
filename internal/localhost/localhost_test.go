@@ -1,11 +1,25 @@
 package localhost
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+// A line longer than Script accepts ends the command with an error instead of
+// leaving it blocked on a pipe nobody reads.
+func TestScriptStopsOnOverlongLine(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	err := (&Host{}).Script(ctx, "head -c 2000000 /dev/zero | tr '\\000' x; sleep 30", nil)
+	if !errors.Is(err, bufio.ErrTooLong) || ctx.Err() != nil {
+		t.Fatalf("err %v, ctx %v", err, ctx.Err())
+	}
+}
 
 // WriteFile must create new directories 0700 and the file with its final
 // mode, leaving no temporary file behind.

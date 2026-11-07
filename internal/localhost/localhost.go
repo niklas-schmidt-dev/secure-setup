@@ -90,6 +90,13 @@ func (h *Host) Script(ctx context.Context, script string, onLine func(string)) e
 			onLine(line)
 		}
 	}
+	if serr := sc.Err(); serr != nil {
+		// Nothing reads the pipe any more, so the command would never end:
+		// stop it instead of waiting for it.
+		_ = c.Process.Kill()
+		pr.CloseWithError(serr)
+		return fmt.Errorf("command stopped: %w (a line longer than 1 MiB)", serr)
+	}
 	err := <-waitErr
 	if ctx.Err() != nil {
 		return ctx.Err()

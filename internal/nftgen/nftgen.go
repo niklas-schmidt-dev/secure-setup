@@ -30,7 +30,12 @@ const (
 
 // Params describes the inbound policy for one server.
 type Params struct {
-	AdminInterface   string   // interface the tailnet arrives on (tailscale0)
+	AdminInterface string // interface the tailnet arrives on (tailscale0)
+	// AdminAddress, when set, is the only address on AdminInterface the
+	// admin rule accepts: an existing private network, whose interface may
+	// also carry public addresses (and may then be an uplink too). Unset for
+	// Tailscale, whose interface carries nothing but tailnet addresses.
+	AdminAddress     netip.Addr
 	WANInterface     string   // interface that carries the default route (eth0, ens3, ...)
 	ExtraWAN         []string // further internet-facing interfaces (an IPv6 uplink, a second default route)
 	TailnetTCPPorts  []int    // TCP ports reachable from the tailnet; must contain the SSH port
@@ -45,6 +50,7 @@ type view struct {
 	Params
 	TableName       string
 	Marker          string
+	AdminMatch      string // `iifname "tailscale0"`, or with `ip daddr ...` for AdminAddress
 	TailnetPortList string
 	WebPortList     string
 	WANSet          string // "eth0", or { "eth0", "he-ipv6" } with extra uplinks
@@ -66,6 +72,7 @@ func Render(p Params) (string, error) {
 		Params:          p,
 		TableName:       TableName,
 		Marker:          Marker,
+		AdminMatch:      adminMatch(p.AdminInterface, p.AdminAddress),
 		TailnetPortList: joinPorts(p.TailnetTCPPorts),
 		WebPortList:     joinPorts(p.WebPorts),
 		WANSet:          ifaceSet(append([]string{p.WANInterface}, p.ExtraWAN...)),
@@ -110,9 +117,18 @@ func (p Params) normalized() (Params, error) {
 			return p, fmt.Errorf("nftgen: invalid interface name %q", n)
 		}
 	}
-	for _, n := range append([]string{p.WANInterface}, p.ExtraWAN...) {
-		if p.AdminInterface == n {
-			return p, fmt.Errorf("nftgen: admin interface and internet interface are both %q", n)
+	if p.AdminAddress.IsValid() {
+		if p.AdminAddress.Zone() != "" || !p.AdminAddress.Unmap().IsGlobalUnicast() {
+			return p, fmt.Errorf("nftgen: admin address %s is not a unicast address", p.AdminAddress)
+		}
+		p.AdminAddress = p.AdminAddress.Unmap()
+	} else {
+		// Without an address the admin rule trusts the whole interface, so it
+		// must never face the internet.
+		for _, n := range append([]string{p.WANInterface}, p.ExtraWAN...) {
+			if p.AdminInterface == n {
+				return p, fmt.Errorf("nftgen: admin interface and internet interface are both %q", n)
+			}
 		}
 	}
 	if p.TailscaleUDPPort == 0 {
@@ -164,6 +180,20 @@ func joinPrefixes(ps []netip.Prefix) string {
 		s[i] = p.String()
 	}
 	return strings.Join(s, ", ")
+}
+
+// adminMatch is what the admin rule matches: the interface, and the admin
+// address on it when there is one.
+func adminMatch(iface string, addr netip.Addr) string {
+	m := `iifname "` + iface + `"`
+	switch {
+	case !addr.IsValid():
+	case addr.Is4():
+		m += " ip daddr " + addr.String()
+	default:
+		m += " ip6 daddr " + addr.String()
+	}
+	return m
 }
 
 // ifaceSet renders one interface name as "eth0" and several as an

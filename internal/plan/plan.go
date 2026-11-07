@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -76,8 +77,13 @@ type Firewall struct {
 	WANInterface    string `json:"wan_interface,omitempty"`
 	// WANOverride confirms that WANInterface deliberately differs from the
 	// interface of the server's default route.
-	WANOverride    bool `json:"wan_interface_override,omitempty"`
-	CloudflareSync bool `json:"cloudflare_sync"`
+	WANOverride bool `json:"wan_interface_override,omitempty"`
+	// ExtraWANInterfaces names further interfaces that face the internet
+	// where detection cannot tell, such as a private-address uplink behind
+	// the provider's NAT. Forwarded traffic from them is filtered like the
+	// internet.
+	ExtraWANInterfaces []string `json:"extra_wan_interfaces,omitempty"`
+	CloudflareSync     bool     `json:"cloudflare_sync"`
 	// CloudflareTunnel serves the web through a Cloudflare Tunnel instead of
 	// an open port: cloudflared connects out, nothing listens in. It
 	// replaces WebPorts. The token comes from the wizard or
@@ -115,7 +121,10 @@ func Default() Plan {
 	}
 }
 
-var hostRe = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+var (
+	hostRe  = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+	ifaceRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
+)
 
 // Validate checks the plan for mistakes that would make the run fail or lock
 // the user out.
@@ -143,8 +152,20 @@ func (p *Plan) Validate() error {
 	if p.Tailscale.AdminInterface == "" {
 		errs = append(errs, errors.New("admin interface is required"))
 	}
-	if p.Tailscale.UseExisting && p.Tailscale.AdminAddress == "" {
-		errs = append(errs, errors.New("admin address is required when using an existing private network"))
+	if p.Tailscale.UseExisting {
+		if p.Tailscale.AdminAddress == "" {
+			errs = append(errs, errors.New("admin address is required when using an existing private network"))
+		} else if a, err := netip.ParseAddr(p.Tailscale.AdminAddress); err != nil || a.Zone() != "" {
+			errs = append(errs, fmt.Errorf("admin address %q is not an IP address", p.Tailscale.AdminAddress))
+		}
+	}
+	for _, n := range p.Firewall.ExtraWANInterfaces {
+		switch {
+		case !ifaceRe.MatchString(n):
+			errs = append(errs, fmt.Errorf("extra_wan_interfaces: %q is not an interface name", n))
+		case n == p.Tailscale.AdminInterface && !p.Tailscale.UseExisting:
+			errs = append(errs, fmt.Errorf("extra_wan_interfaces names the admin interface %s", n))
+		}
 	}
 	if p.Tailscale.UDPPort < 1 || p.Tailscale.UDPPort > 65535 {
 		errs = append(errs, fmt.Errorf("tailscale UDP port %d is out of range", p.Tailscale.UDPPort))
@@ -199,6 +220,16 @@ func TunnelToken(s string) (string, error) {
 		return "", errors.New("no Cloudflare Tunnel token in what was pasted: copy the command under \"Install as service\" (cloudflared service install ...) or the token alone")
 	}
 	return "", errors.New("more than one Cloudflare Tunnel token in what was pasted: paste one command or one token")
+}
+
+// AdminAddr is the existing private network's address, which the admin rule
+// is bound to; Tailscale has none (the zero Addr).
+func (p Plan) AdminAddr() netip.Addr {
+	if !p.Tailscale.UseExisting {
+		return netip.Addr{}
+	}
+	a, _ := netip.ParseAddr(p.Tailscale.AdminAddress)
+	return a
 }
 
 // Address is host:port of the public SSH endpoint.

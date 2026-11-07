@@ -40,6 +40,9 @@ func (p Prompter) ConfirmHostKey(ctx context.Context, addr, keyType, fingerprint
 }
 
 func (p Prompter) Confirm(ctx context.Context, title, detail string) (bool, error) {
+	// Questions can carry server text, such as the name of the tailnet a
+	// login link joined.
+	title, detail = runner.Printable(title), runner.Printable(detail)
 	if detail != "" {
 		fmt.Fprintln(p.out(), detail)
 	}
@@ -68,6 +71,7 @@ func (p Prompter) Confirm(ctx context.Context, title, detail string) (bool, erro
 }
 
 func (p Prompter) Secret(ctx context.Context, title, detail string) (string, error) {
+	title, detail = runner.Printable(title), runner.Printable(detail)
 	if detail != "" {
 		fmt.Fprintln(p.out(), detail)
 	}

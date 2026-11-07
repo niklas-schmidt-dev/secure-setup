@@ -47,9 +47,9 @@ table inet {{.TableName}} {
 
 		# Administration: only over the tailnet (the counter shows new connections through this rule)
 {{- if .TailnetAll}}
-		iifname "{{.AdminInterface}}" counter accept
+		{{.AdminMatch}} counter accept
 {{- else}}
-		iifname "{{.AdminInterface}}" tcp dport { {{.TailnetPortList}} } counter accept
+		{{.AdminMatch}} tcp dport { {{.TailnetPortList}} } counter accept
 {{- end}}
 {{- if .WebPorts}}
 

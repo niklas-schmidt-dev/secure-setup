@@ -68,6 +68,23 @@ nft -f /tmp/two-uplinks.nft
 if reach a 10.91.3.2 8080 || reach b 10.91.3.2 8080; then echo "FAIL: an uplink reaches the workload"; exit 1; fi
 reach c 10.91.2.2 9090 || { echo "FAIL: the workload cannot reach out"; exit 1; }
 echo "both uplinks named: neither reaches the workload, its outbound traffic still works"
+
+# Existing private network on upa, which also carries a public address
+# (10.91.4.1): SSH only to the admin address, and upa is filtered like the
+# internet for forwarding. The tailnet-style rule trusts every address on it.
+ip addr add 10.91.4.1/24 dev upa
+ip -n a addr add 10.91.4.2/24 dev a0
+nc -lk 22 </dev/null >/dev/null 2>&1 &
+sleep 1
+sed 's/"tailscale0"/"upa"/g; s/"eth0"/"upb"/g' /t/goldens/default.nft > /tmp/interface-wide.nft
+nft -f /tmp/interface-wide.nft
+if reach a 10.91.4.1 22; then echo "interface-wide admin rule: the other address on upa reaches SSH"; else echo "FAIL: control did not reproduce"; exit 1; fi
+sed 's/"eth1"/"upa"/g; s/"eth0"/"upb"/g; s/10\.0\.0\.5/10.91.1.1/g' /t/goldens/existing-network.nft > /tmp/existing-network.nft
+nft -f /tmp/existing-network.nft
+reach a 10.91.1.1 22 || { echo "FAIL: the admin address is not reachable"; exit 1; }
+if reach a 10.91.4.1 22; then echo "FAIL: another address on the admin interface reaches SSH"; exit 1; fi
+if reach a 10.91.3.2 8080; then echo "FAIL: the internet-facing admin interface reaches the workload"; exit 1; fi
+echo "existing network: SSH only to the admin address; its interface is filtered like the internet"
 echo "ALL CHECKS PASSED"
 INNER
 COPYFILE_DISABLE=1 tar --no-xattrs -C "$tmp" -cf - . | docker --context "$ctx" run --rm -i --privileged debian:bookworm-slim \

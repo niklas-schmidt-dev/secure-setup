@@ -17,6 +17,10 @@ func TestRenderGolden(t *testing.T) {
 		"web-both":          {WANInterface: "ens3", TailnetTCPPorts: []int{22, 8080}, WebPorts: []int{80, 443}},
 		"tailnet-all-noweb": {WANInterface: "eth0", TailnetAll: true, TailnetTCPPorts: []int{22}, AllowPing: true},
 		"two-uplinks":       {WANInterface: "eth0", ExtraWAN: []string{"he-ipv6", "eth0", "he-ipv6"}, TailnetTCPPorts: []int{22}, WebPorts: []int{443}},
+		// An existing private network on a card that also carries a public
+		// address: administration only to the private address, forwarding
+		// from the card filtered like the internet.
+		"existing-network": {AdminInterface: "eth1", AdminAddress: netip.MustParseAddr("10.0.0.5"), WANInterface: "eth0", ExtraWAN: []string{"eth1"}, TailnetTCPPorts: []int{22}, WebPorts: []int{443}},
 	}
 	for name, p := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -51,6 +55,8 @@ func TestRenderRejectsBadInput(t *testing.T) {
 		{WANInterface: "eth0", TailnetTCPPorts: []int{22}, WebPorts: []int{0}},
 		{WANInterface: "eth0", ExtraWAN: []string{"tailscale0"}, TailnetTCPPorts: []int{22}}, // admin as an uplink
 		{WANInterface: "eth0", ExtraWAN: []string{"x\"y"}, TailnetTCPPorts: []int{22}},       // injection
+		{AdminInterface: "eth1", AdminAddress: netip.MustParseAddr("fe80::1%eth1"), WANInterface: "eth0", TailnetTCPPorts: []int{22}},
+		{AdminInterface: "eth1", AdminAddress: netip.MustParseAddr("127.0.0.1"), WANInterface: "eth0", TailnetTCPPorts: []int{22}},
 	}
 	for i, p := range bad {
 		if _, err := Render(p); err == nil {
@@ -88,6 +94,28 @@ func TestRenderContents(t *testing.T) {
 	}
 	if strings.Contains(noweb, "@cloudflare_v4 tcp") {
 		t.Error("web rule present although no web ports were given")
+	}
+}
+
+// With an admin address the admin rule matches it, IPv4 or IPv6, and the
+// admin interface may also be an uplink; without one it may not.
+func TestRenderAdminAddress(t *testing.T) {
+	for addr, want := range map[string]string{
+		"10.0.0.5":           `iifname "eth0" ip daddr 10.0.0.5 counter accept`,
+		"::ffff:10.0.0.5":    `iifname "eth0" ip daddr 10.0.0.5 counter accept`,
+		"fd00:5::7":          `iifname "eth0" ip6 daddr fd00:5::7 counter accept`,
+		"2001:db8:0:1::4002": `iifname "eth0" ip6 daddr 2001:db8:0:1::4002 counter accept`,
+	} {
+		out, err := Render(Params{AdminInterface: "eth0", AdminAddress: netip.MustParseAddr(addr), WANInterface: "eth0", TailnetAll: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, want) || !strings.Contains(out, `iifname != "eth0" accept`) {
+			t.Errorf("%s: missing %q in:\n%s", addr, want, out)
+		}
+	}
+	if _, err := Render(Params{AdminInterface: "eth0", WANInterface: "eth0", TailnetAll: true}); err == nil {
+		t.Error("an uplink was trusted as the admin interface without an admin address")
 	}
 }
 

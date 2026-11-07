@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/niklas-schmidt-dev/secure-setup/internal/plan"
+	"github.com/niklas-schmidt-dev/secure-setup/internal/runner"
 )
 
 var ctrlC = tea.KeyMsg{Type: tea.KeyCtrlC}
@@ -120,5 +122,27 @@ func TestQuestionAfterAbortIsNotShown(t *testing.T) {
 	}
 	if r := <-reply; !r.abort {
 		t.Fatalf("reply %+v, want abort", r)
+	}
+}
+
+// The run screen keeps a bounded amount of server output: 400 lines, each
+// cut short, and the latest few attention notes.
+func TestRunScreenRetentionIsBounded(t *testing.T) {
+	m, _ := runningModel(t)
+	m.steps, m.states, m.skipReason = []string{"step"}, make([]stepState, 1), make([]string, 1)
+	long := strings.Repeat("é", 50_000)
+	for i := 0; i < 210; i++ {
+		m.Update(runEventMsg{Kind: runner.Log, Text: long})
+		m.Update(runEventMsg{Kind: runner.Attention, Text: long})
+	}
+	total := 0
+	for _, l := range m.logs {
+		total += len(l)
+	}
+	if len(m.logs) != 400 || total > 400*(maxLogLine+3) || len(m.attention) > 10 || len(m.attention[len(m.attention)-1]) > 4003 {
+		t.Fatalf("%d log lines, %d bytes, %d attention notes", len(m.logs), total, len(m.attention))
+	}
+	if !utf8.ValidString(m.logs[0]) {
+		t.Fatal("a cut line is not valid UTF-8")
 	}
 }

@@ -38,13 +38,16 @@ Firewall rules are applied under a transient systemd timer that restores the
 previous ruleset if secure-setup cannot confirm the new one within your chosen
 window. From your machine the confirmation is a brand-new SSH connection over
 the tailnet. On the server it is a new login from another device: the admin
-rule's packet counter must move, and then either a session from a machine
-other than this one is visible on the tailnet address, or sshd (journal
-entries with _UID=0) logged an accepted login; `secure-setup confirm` in that
-session is the explicit form. In unattended mode (`here --yes`) it is a
-self-check: admin rule loaded, a root-owned sshd socket on the tailnet
-address, Tailscale running and online, and an optional ping to a tailnet
-peer. Self-checks cannot see your tailnet ACL. The host firewall that was
+rule's packet counter must move, and sshd (journal entries with _UID=0) must
+log an accepted login from a machine other than this one, over a connection
+that opened after the rules went live. An open TCP connection alone does not
+count. `secure-setup confirm` in that session is the explicit form. In
+unattended mode (`here --yes`) it is a self-check: admin rule loaded, a
+root-owned sshd socket on the tailnet address, Tailscale running and online,
+and an optional ping to a tailnet peer. Self-checks cannot see your tailnet
+ACL. The confirmation and a rollback fired by the timer claim the outcome
+with one atomic step, so a confirmation that arrives too late never cuts a
+rollback short or persists the rules over it. The host firewall that was
 running before (ufw, firewalld) is stopped only under the same timer, stays
 enabled at boot until the confirmation, and comes back with a rollback. The
 rules are kept only when `nftables.service` loads a file that includes them.
@@ -78,5 +81,8 @@ including forced lockouts, and check that the server comes back.
   server) only the checksum is checked; `gh attestation verify` (see the
   README) can be run anywhere.
 - Your existing SSH session survives the firewall change (conntrack). That is
-  by design and does not weaken the result; the final step proves a fresh
-  connection to the public port is blocked.
+  by design and does not weaken the result; the final step checks that a
+  fresh connection to the public port is blocked, and the run fails if it
+  still succeeds. When the run reached the server over its private address,
+  or your computer cannot try the public address (no name resolution, no
+  route), the result says it was not tested instead of calling it blocked.
