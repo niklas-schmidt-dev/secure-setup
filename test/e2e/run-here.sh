@@ -177,5 +177,20 @@ d exec "$srv" secure-setup undo --here --yes 2>&1 | sed 's/^/   /'
 d exec "$srv" nft list table inet secure_setup >/dev/null 2>&1 && fail "table still present after undo" || echo "   table removed"
 d exec "$cli" nc -z -w 5 "$pubip" 22 && echo "   public ssh open again"
 d exec "$srv" test -f /etc/ssh/sshd_config.d/00-secure-setup.conf && fail "sshd drop-in still present" || echo "   sshd drop-in removed"
+
+echo "== run 7: ctrl+c in the wizard while it waits for the login; it stays until the run has cleaned up"
+d cp test/e2e/here-tui-abort.exp "$srv:/root/here-tui-abort.exp"
+d exec -d -e E2E_PRIVATE_IP="$prvip" "$srv" sh -c 'HOME=/root TERM=xterm expect -f /root/here-tui-abort.exp > /root/run7.log 2>&1; echo "EXIT=$?" >> /root/run7.log'
+wait_log /root/run7.log "EXIT=" 180
+d exec "$srv" grep -q "WALK: cleanup ran" /root/run7.log || { d exec "$srv" tail -40 /root/run7.log; fail "the wizard did not wait for the cleanup"; }
+d exec "$srv" grep -q "WALK: exit 130" /root/run7.log || { d exec "$srv" grep -a WALK /root/run7.log; fail "an aborted wizard should exit 130"; }
+d exec "$srv" test -f /etc/ssh/sshd_config.d/00-secure-setup.conf && fail "sshd drop-in left behind after ctrl+c" || true
+d exec "$srv" sh -c 'sshd -T | grep -q "^passwordauthentication yes"' || fail "password login not restored after ctrl+c"
+echo "   the wizard waited: password login restored, exit 130"
+for i in $(seq 1 90); do
+	d exec "$srv" nft list table inet secure_setup >/dev/null 2>&1 || break
+	sleep 1
+done
+d exec "$srv" nft list table inet secure_setup >/dev/null 2>&1 && fail "the rollback timer did not restore the firewall after ctrl+c" || echo "   the rollback timer restored the previous firewall"
 echo
 echo "E2E HERE PASSED"
