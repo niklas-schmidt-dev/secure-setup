@@ -1,10 +1,11 @@
 #!/bin/sh
-# End-to-end test of `secure-setup here` on the NAS Docker host: the binary
-# runs INSIDE the throwaway systemd "VPS" (eth0 = internet, eth1 = private
-# network standing in for the tailnet). A client container logs in over the
-# private network to confirm. Covers: login confirmation (automatic and via
-# `secure-setup confirm`), self-check confirmation, the rollback when no login
-# arrives, sshd hardening preconditions, the TUI, and `undo --here`.
+# End-to-end test of `secure-setup here` on a Docker host (the NAS, or the
+# runner in CI): the binary runs INSIDE the throwaway systemd "VPS" (eth0 =
+# internet, eth1 = private network standing in for the tailnet). A client
+# container logs in over the private network to confirm. Covers: login
+# confirmation (automatic and via `secure-setup confirm`), self-check
+# confirmation, the rollback when no login arrives, sshd hardening
+# preconditions, the TUI, and `undo --here`.
 # Usage: test/e2e/run-here.sh       (DOCKER_CONTEXT defaults to nas-docker)
 set -eu
 cd "$(dirname "$0")/../.."
@@ -35,8 +36,11 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$bin" .
 echo "== start server and client"
 d network create --subnet "${E2E_SUBNET_PUBLIC:-10.250.100.0/24}" "$pub" >/dev/null
 d network create --subnet "${E2E_SUBNET_PRIVATE:-10.250.101.0/24}" "$prv" >/dev/null
-d run -d --name "$srv" --restart unless-stopped --privileged --hostname here-vps --network "$pub" secure-setup-e2e-server >/dev/null
-d network connect "$prv" "$srv"
+# Pinned names: a container restarted by its policy (the simulated reboot) can
+# otherwise get its two cards in the other order (Docker 28 or newer).
+ifname=com.docker.network.endpoint.ifname
+d run -d --name "$srv" --restart unless-stopped --privileged --hostname here-vps --network "name=$pub,driver-opt=$ifname=eth0" secure-setup-e2e-server >/dev/null
+d network connect --driver-opt "$ifname=eth1" "$prv" "$srv"
 d run -d --name "$cli" --network "$pub" secure-setup-e2e-client >/dev/null
 d network connect "$prv" "$cli"
 d cp "$bin" "$srv:/usr/local/bin/secure-setup"
@@ -92,7 +96,9 @@ echo "   rules live, public ssh blocked; logging in over the private network"
 login "$prvip" "echo hello-from-client" | grep -q hello-from-client || fail "private login failed"
 wait_log /root/run1.log "EXIT=" 60
 d exec "$srv" grep -Eq "new SSH session from .* through the eth1 rule: the rules let you in|sshd accepted a login by root from $cliprv after the rules went live" /root/run1.log || { d exec "$srv" tail -30 /root/run1.log; fail "login not detected"; }
-d exec "$srv" grep -q "a connection arrived over eth1 through the new rule" /root/run1.log || fail "rule counter did not register the login"
+# Both lines need the eth1 rule's counter above zero; which one appears depends
+# on whether a poll still saw the short session open.
+d exec "$srv" grep -Eq "a connection arrived over eth1 through the new rule|new SSH session from .* through the eth1 rule" /root/run1.log || { d exec "$srv" tail -30 /root/run1.log; fail "rule counter did not register the login"; }
 d exec "$srv" grep -q "This machine is locked down" /root/run1.log || { d exec "$srv" tail -30 /root/run1.log; fail "run 1 did not report success"; }
 d exec "$srv" grep -q "EXIT=0" /root/run1.log || fail "run 1 should exit 0"
 

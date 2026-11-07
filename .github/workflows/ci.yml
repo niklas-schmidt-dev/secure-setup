@@ -31,3 +31,41 @@ jobs:
         run: sh -n install.sh
       - name: known vulnerabilities in called code
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  # The generated rulesets and the scripts the server runs, against a real nft
+  # binary in a privileged container on the runner's own Docker.
+  ruleset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DOCKER_CONTEXT: default
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - run: scripts/validate-ruleset.sh
+
+  # Full runs against a throwaway systemd server, one runner per script so
+  # their networks never meet.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        script: [run.sh, run-here.sh]
+    env:
+      DOCKER_CONTEXT: default
+      E2E_SCRIPT: ${{ matrix.script }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: build the e2e images
+        run: |
+          docker build -q -t secure-setup-e2e-server -f test/e2e/Dockerfile.server test/e2e
+          docker build -q -t secure-setup-e2e-client -f test/e2e/Dockerfile.client test/e2e
+      - run: test/e2e/"$E2E_SCRIPT"

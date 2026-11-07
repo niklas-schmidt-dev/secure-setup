@@ -1,9 +1,10 @@
 #!/bin/sh
-# End-to-end test on the NAS Docker host: a throwaway systemd "VPS" with two
-# networks (eth0 = "internet", eth1 = "private network") and a client container
-# that runs secure-setup against it. Covers: detection, nftables install,
-# sshd hardening, Cloudflare ranges, apply + confirm, verification that the
-# public port is closed, the automatic rollback, and undo.
+# End-to-end test on a Docker host (the NAS, or the runner in CI): a throwaway
+# systemd "VPS" with two networks (eth0 = "internet", eth1 = "private network")
+# and a client container that runs secure-setup against it. Covers: detection,
+# nftables install, sshd hardening, Cloudflare ranges, apply + confirm,
+# verification that the public port is closed, the automatic rollback, and
+# undo.
 # Usage: test/e2e/run.sh          (DOCKER_CONTEXT defaults to nas-docker)
 set -eu
 cd "$(dirname "$0")/../.."
@@ -25,8 +26,11 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$bin" .
 echo "== start server and client"
 d network create --subnet "${E2E_SUBNET_PUBLIC:-10.250.100.0/24}" "$pub" >/dev/null
 d network create --subnet "${E2E_SUBNET_PRIVATE:-10.250.101.0/24}" "$prv" >/dev/null
-d run -d --name "$srv" --restart unless-stopped --privileged --hostname e2e-vps --network "$pub" secure-setup-e2e-server >/dev/null
-d network connect "$prv" "$srv"
+# Pinned names: a container restarted by its policy (the simulated reboot) can
+# otherwise get its two cards in the other order (Docker 28 or newer).
+ifname=com.docker.network.endpoint.ifname
+d run -d --name "$srv" --restart unless-stopped --privileged --hostname e2e-vps --network "name=$pub,driver-opt=$ifname=eth0" secure-setup-e2e-server >/dev/null
+d network connect --driver-opt "$ifname=eth1" "$prv" "$srv"
 d run -d --name "$cli" --network "$pub" secure-setup-e2e-client >/dev/null
 d network connect "$prv" "$cli"
 d cp "$bin" "$cli:/usr/local/bin/secure-setup"
