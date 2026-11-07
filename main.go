@@ -209,6 +209,11 @@ func cmdApply(ctx context.Context, args []string) error {
 	p.Server.Passphrase = os.Getenv("SECURE_SETUP_PASSPHRASE")
 	p.Tailscale.AuthKey = os.Getenv("TS_AUTHKEY")
 	p.Firewall.TunnelToken = os.Getenv("CLOUDFLARE_TUNNEL_TOKEN")
+	// Again with the secrets from the environment: it takes the tunnel token
+	// out of a pasted install command.
+	if err := p.Validate(); err != nil {
+		return err
+	}
 	if p.Local {
 		host, err := localhost.New(ctx)
 		if err != nil {

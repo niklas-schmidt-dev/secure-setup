@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -79,7 +80,9 @@ type Firewall struct {
 	CloudflareSync bool `json:"cloudflare_sync"`
 	// CloudflareTunnel serves the web through a Cloudflare Tunnel instead of
 	// an open port: cloudflared connects out, nothing listens in. It
-	// replaces WebPorts. The token comes from CLOUDFLARE_TUNNEL_TOKEN.
+	// replaces WebPorts. The token comes from the wizard or
+	// CLOUDFLARE_TUNNEL_TOKEN, either bare or inside the install command the
+	// dashboard shows (see TunnelToken).
 	CloudflareTunnel bool   `json:"cloudflare_tunnel,omitempty"`
 	TunnelToken      string `json:"-"`
 	// ConfirmBy applies to local runs only: "login" (default) or "self".
@@ -157,10 +160,45 @@ func (p *Plan) Validate() error {
 	if p.Firewall.CloudflareTunnel && len(p.Firewall.WebPorts) > 0 {
 		errs = append(errs, errors.New("cloudflare_tunnel replaces web_ports: with a tunnel no web port is opened, so leave web_ports empty"))
 	}
+	if p.Firewall.TunnelToken != "" {
+		tok, err := TunnelToken(p.Firewall.TunnelToken)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		p.Firewall.TunnelToken = tok
+	}
 	if len(p.Firewall.WebPorts) == 0 && p.Firewall.CloudflareSync {
 		p.Firewall.CloudflareSync = false
 	}
 	return errors.Join(errs...)
+}
+
+// tunnelTokenRe matches a Cloudflare Tunnel token: base64 of a JSON object.
+var tunnelTokenRe = regexp.MustCompile(`^eyJ[A-Za-z0-9+/_-]{20,}={0,2}$`)
+
+// TunnelToken returns the token from s, which is the token itself or a whole
+// command copied from the dashboard's install page, such as
+// `sudo cloudflared service install <token>` or
+// `cloudflared tunnel run --token <token>`. The dashboard has no copy button
+// for the bare token.
+func TunnelToken(s string) (string, error) {
+	fields := strings.Fields(s)
+	if len(fields) == 1 {
+		return fields[0], nil
+	}
+	var found []string
+	for _, f := range fields {
+		if tunnelTokenRe.MatchString(f) && !slices.Contains(found, f) {
+			found = append(found, f)
+		}
+	}
+	switch len(found) {
+	case 1:
+		return found[0], nil
+	case 0:
+		return "", errors.New("no Cloudflare Tunnel token in what was pasted: copy the command under \"Install as service\" (cloudflared service install ...) or the token alone")
+	}
+	return "", errors.New("more than one Cloudflare Tunnel token in what was pasted: paste one command or one token")
 }
 
 // Address is host:port of the public SSH endpoint.

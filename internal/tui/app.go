@@ -299,8 +299,8 @@ func (m *model) firewallForm() *huh.Form {
 		Affirmative("Yes").Negative("No").Value(&m.plan.Reboot)
 	// Only for the tunnel: the token from the Cloudflare dashboard.
 	tunnel := huh.NewGroup(
-		huh.NewNote().Title("Cloudflare Tunnel").Description("cloudflared connects out to Cloudflare, so no web port is opened. Create a tunnel in the Cloudflare dashboard (Networks > Tunnels), route your hostname to the local service there (for example http://localhost:8080), and paste the token from its install command."),
-		huh.NewInput().Title("Tunnel token").Description("Leave empty on a rerun to keep the stored token.").
+		huh.NewNote().Title("Cloudflare Tunnel").Description("cloudflared connects out to Cloudflare, so no web port is opened. In the Cloudflare dashboard, create a tunnel (Networks > Tunnels). On its install page, copy the command under \"Install as service\" with its copy button and paste it here as it is; the token is taken out of it. The page waits for a connection until this run has connected the tunnel. Then click Next there and route your hostname to the local service (for example http://localhost:8080)."),
+		huh.NewInput().Title("Tunnel token or install command").Description("Leave empty on a rerun to keep the stored token.").
 			EchoMode(huh.EchoModePassword).Value(&m.tunnelToken),
 	).WithHideFunc(func() bool { return m.webChoice != "tunnel" })
 	return huh.NewForm(huh.NewGroup(fields...), tunnel, huh.NewGroup(update, reboot)).WithShowHelp(true)
