@@ -107,6 +107,44 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+// A pinned host key is a SHA256 fingerprint; anything else is refused before
+// a connection is made.
+func TestValidateHostKey(t *testing.T) {
+	for key, ok := range map[string]bool{
+		"": true,
+		"SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8":                               true,
+		"SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8=":                              false,
+		"MD5:16:27:ac:a5:76:28:2d:36:63:1b:56:4d:eb:df:a6:48":                              false,
+		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHHT9zwfT6widjbTcsKOGGlmx58L4skpUKesGUJ0u4kk": false,
+	} {
+		p := Default()
+		p.Server.Host, p.Server.HostKey = "203.0.113.10", key
+		if err := p.Validate(); (err == nil) != ok {
+			t.Errorf("host key %q: %v", key, err)
+		}
+	}
+}
+
+// Read leaves validation to a caller that still fills in values: a plan for
+// several servers has no host of its own.
+func TestReadDoesNotValidate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fleet.json")
+	if err := os.WriteFile(path, []byte(`{"firewall":{"web_ports":[]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("a plan without a server host loaded")
+	}
+	p, err := Read(path)
+	if err != nil || p.Server.Port != 22 || len(p.Firewall.WebPorts) != 0 {
+		t.Fatalf("Read: %+v, %v", p.Server, err)
+	}
+	p.Server.Host = "203.0.113.10"
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestParsePorts(t *testing.T) {
 	got, err := ParsePorts("8080, 22;22 443")
 	if err != nil || FormatPorts(got) != "22, 443, 8080" {

@@ -47,10 +47,14 @@ const (
 
 // Server is how we reach the machine today, over its public address.
 type Server struct {
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	User       string `json:"user"`
-	KeyPath    string `json:"key_path,omitempty"`
+	Host    string `json:"host"`
+	Port    int    `json:"port"`
+	User    string `json:"user"`
+	KeyPath string `json:"key_path,omitempty"`
+	// HostKey pins the server's host key: its SHA256 fingerprint as
+	// `ssh-keygen -lf` prints it. The first connection then accepts that key
+	// only, instead of asking or (with --yes) trusting the first key seen.
+	HostKey    string `json:"host_key,omitempty"`
 	Password   string `json:"-"`
 	Passphrase string `json:"-"`
 }
@@ -123,8 +127,9 @@ func Default() Plan {
 }
 
 var (
-	hostRe  = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
-	ifaceRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
+	hostKeyRe = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
+	hostRe    = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+	ifaceRe   = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 )
 
 // Validate checks the plan for mistakes that would make the run fail or lock
@@ -148,6 +153,9 @@ func (p *Plan) Validate() error {
 		}
 		if p.Server.User == "" {
 			errs = append(errs, errors.New("server user is required"))
+		}
+		if p.Server.HostKey != "" && !hostKeyRe.MatchString(p.Server.HostKey) {
+			errs = append(errs, fmt.Errorf("host key %q is not a SHA256 fingerprint; use what `ssh-keygen -lf` prints, such as SHA256:AbC...", p.Server.HostKey))
 		}
 	}
 	if p.Tailscale.AdminInterface == "" {
@@ -238,8 +246,21 @@ func (p Plan) Address() string {
 	return net.JoinHostPort(p.Server.Host, strconv.Itoa(p.Server.Port))
 }
 
-// Load reads a plan file.
+// Load reads a plan file and validates it.
 func Load(path string) (Plan, error) {
+	p, err := Read(path)
+	if err != nil {
+		return Plan{}, err
+	}
+	if err := p.Validate(); err != nil {
+		return Plan{}, fmt.Errorf("%s: %w", path, err)
+	}
+	return p, nil
+}
+
+// Read reads a plan file on top of the defaults without validating it, for
+// a caller that still fills in values (`apply --host`).
+func Read(path string) (Plan, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Plan{}, err
@@ -251,9 +272,6 @@ func Load(path string) (Plan, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&p); err != nil {
 		return Plan{}, fmt.Errorf("parse %s: %w", path, err)
-	}
-	if err := p.Validate(); err != nil {
-		return Plan{}, fmt.Errorf("%s: %w", path, err)
 	}
 	return p, nil
 }

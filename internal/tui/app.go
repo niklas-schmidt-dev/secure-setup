@@ -753,7 +753,7 @@ func (m *model) preflight() tea.Cmd {
 		if auth.Password != "" && p.SSH.Harden && len(sshx.LocalPublicKeys(auth, "")) == 0 {
 			return preflightMsg{err: errors.New("no public key on this computer to install on the server; run `ssh-keygen -t ed25519` first (or choose key authentication)")}
 		}
-		c, err := sshx.Dial(ctx, p.Address(), auth, sshx.HostKeyPolicy{Prompter: pr})
+		c, err := sshx.Dial(ctx, p.Address(), auth, sshx.HostKeyPolicy{Prompter: pr, Fingerprint: p.Server.HostKey})
 		if err != nil {
 			return preflightMsg{err: err}
 		}

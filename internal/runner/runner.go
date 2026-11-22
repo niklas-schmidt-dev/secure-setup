@@ -293,7 +293,7 @@ func (r *Runner) connect(ctx context.Context, log func(string)) error {
 		}
 	}
 	log("connecting to " + p.Address() + " as " + p.Server.User)
-	c, err := r.dial(ctx, p.Address(), sshx.HostKeyPolicy{Prompter: r.o.Prompt, Warn: log})
+	c, err := r.dial(ctx, p.Address(), sshx.HostKeyPolicy{Prompter: r.o.Prompt, Warn: log, Fingerprint: p.Server.HostKey})
 	if err != nil {
 		return err
 	}

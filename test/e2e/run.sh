@@ -49,18 +49,29 @@ d exec "$cli" nc -z -w 5 "$pubip" 22 || fail "public ssh not reachable before th
 d exec "$cli" nc -z -w 5 "$prvip" 22 || fail "private ssh not reachable before the run"
 
 echo "== run 1: apply (existing private network stands in for the tailnet)"
+# The plan names no real server: --host gives the address, and --host-key the
+# key the server must present, here its Ed25519 key, which is not the kind a
+# connection asks for first.
 d exec -i "$cli" sh -c 'cat > /root/plan.json' <<JSON
 {
   "update_system": true,
   "reboot": true,
-  "server": {"host": "$pubip", "port": 22, "user": "root", "key_path": "/root/.ssh/id_ed25519"},
+  "server": {"host": "192.0.2.1", "port": 22, "user": "root", "key_path": "/root/.ssh/id_ed25519"},
   "tailscale": {"admin_interface": "eth1", "udp_port": 41641, "use_existing_network": true, "admin_address": "$prvip"},
   "firewall": {"web_ports": [443], "allow_ping": true, "tailnet_ports": [22, 8080], "rollback_seconds": 30, "cloudflare_sync": true},
   "ssh": {"harden": true, "add_local_key": true}
 }
 JSON
-d exec "$cli" secure-setup apply -f /root/plan.json --yes 2>&1 | tee /tmp/e2e-run1.log
+fp=$(d exec "$srv" ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}')
+if d exec "$cli" secure-setup apply -f /root/plan.json --host "$pubip" --host-key "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" --yes >/tmp/e2e-run1-pin.log 2>&1; then
+	cat /tmp/e2e-run1-pin.log; fail "a host key other than the pinned one was accepted"
+fi
+grep -q "host key mismatch.*the pinned host key is SHA256:AAAA" /tmp/e2e-run1-pin.log || { cat /tmp/e2e-run1-pin.log; fail "the wrong pin was not reported as a host key mismatch"; }
+d exec "$srv" test -e /var/lib/secure-setup && fail "the server was touched although its host key was not the pinned one"
+echo "   a wrong --host-key stops the run before the server is touched"
+d exec "$cli" secure-setup apply -f /root/plan.json --host "$pubip" --host-key "$fp" --yes 2>&1 | tee /tmp/e2e-run1.log
 grep -q "The server is locked down" /tmp/e2e-run1.log || fail "run 1 did not report success"
+grep -q "applying /root/plan.json to $pubip:22" /tmp/e2e-run1.log || fail "--host did not replace the plan's address"
 grep -q "==> Update the system" /tmp/e2e-run1.log && ! grep -q "Update the system: skipped" /tmp/e2e-run1.log || fail "run 1 did not update the system first"
 grep -q "the server rebooted and is reachable over the private network again" /tmp/e2e-run1.log || fail "run 1 did not reboot"
 grep -q "after the reboot: rules loaded, nftables enabled at boot" /tmp/e2e-run1.log || fail "run 1 did not check the server after the reboot"

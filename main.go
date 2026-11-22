@@ -198,24 +198,36 @@ func cmdApply(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	file := fs.String("f", "", "plan file (JSON); the wizard saves one in ~/.config/secure-setup/")
 	yes := fs.Bool("yes", false, "do not ask: accept the plan and first-seen host keys")
+	host := fs.String("host", "", "server address to use instead of the plan's: one plan for several servers")
+	hostKey := fs.String("host-key", "", "fingerprint the server's host key must have (SHA256:..., as ssh-keygen -lf prints it), instead of trusting the first key seen")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *file == "" {
 		return errors.New("apply needs -f plan.json")
 	}
-	p, err := plan.Load(*file)
+	// Validated below, once the flags and the environment are filled in.
+	p, err := plan.Read(*file)
 	if err != nil {
 		return err
+	}
+	if *host != "" {
+		if p.Local {
+			return errors.New("--host does not go with a plan for this machine (\"local\": true)")
+		}
+		p.Server.Host = *host
+	}
+	if *hostKey != "" {
+		p.Server.HostKey = *hostKey
 	}
 	p.Server.Password = os.Getenv("SECURE_SETUP_PASSWORD")
 	p.Server.Passphrase = os.Getenv("SECURE_SETUP_PASSPHRASE")
 	p.Tailscale.AuthKey = os.Getenv("TS_AUTHKEY")
 	p.Firewall.TunnelToken = os.Getenv("CLOUDFLARE_TUNNEL_TOKEN")
-	// Again with the secrets from the environment: it takes the tunnel token
-	// out of a pasted install command.
+	// With the secrets from the environment: it takes the tunnel token out of
+	// a pasted install command.
 	if err := p.Validate(); err != nil {
-		return err
+		return fmt.Errorf("%s: %w", *file, err)
 	}
 	if p.Local {
 		host, err := localhost.New(ctx)
@@ -260,6 +272,9 @@ func describe(p *plan.Plan) string {
 		fmt.Fprintf(&b, "  server          this machine\n")
 	} else {
 		fmt.Fprintf(&b, "  server          %s as %s\n", p.Address(), p.Server.User)
+		if p.Server.HostKey != "" {
+			fmt.Fprintf(&b, "  host key        must be %s\n", p.Server.HostKey)
+		}
 	}
 	if p.Tailscale.UseExisting {
 		fmt.Fprintf(&b, "  admin network   existing, %s on %s\n", p.Tailscale.AdminAddress, p.Tailscale.AdminInterface)

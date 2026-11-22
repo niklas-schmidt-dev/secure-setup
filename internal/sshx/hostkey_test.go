@@ -2,7 +2,9 @@ package sshx
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
 	"net"
@@ -31,7 +33,7 @@ func (s *testServer) got() []string {
 	return append([]string(nil), s.passwords...)
 }
 
-func startServer(t *testing.T, hostKey ssh.Signer) *testServer {
+func startServer(t *testing.T, hostKey ssh.Signer, more ...ssh.Signer) *testServer {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -51,6 +53,9 @@ func startServer(t *testing.T, hostKey ssh.Signer) *testServer {
 		return s.banner
 	}
 	cfg.AddHostKey(hostKey)
+	for _, k := range more {
+		cfg.AddHostKey(k)
+	}
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -174,6 +179,86 @@ func TestHostKeyFirstContact(t *testing.T) {
 	}
 	if pr.calls != 1 {
 		t.Fatal("known key prompted again")
+	}
+}
+
+// A pinned fingerprint answers the first-contact question: the named key is
+// accepted and remembered without a prompt, any other key is refused before
+// the password is sent.
+func TestPinnedHostKey(t *testing.T) {
+	key := newSigner(t)
+	srv := startServer(t, key)
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+	dial := func(fp string, pr HostKeyPrompter) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		c, err := Dial(ctx, srv.addr, Auth{User: "root", Password: "dummy-password"}, HostKeyPolicy{KnownHostsPath: kh, Prompter: pr, Fingerprint: fp})
+		if err == nil {
+			c.Close()
+		}
+		return err
+	}
+	pr := &countingPrompter{}
+	if err := dial(ssh.FingerprintSHA256(newSigner(t).PublicKey()), pr); !errors.Is(err, ErrHostKeyMismatch) {
+		t.Fatalf("another key than the pinned one: %v", err)
+	}
+	if got := srv.got(); len(got) != 0 || pr.calls != 0 {
+		t.Fatalf("password sent (%v) or question asked (%d) for a key that is not the pinned one", got, pr.calls)
+	}
+	if _, err := os.Stat(kh); err == nil {
+		t.Fatal("a refused key was remembered")
+	}
+	if err := dial(ssh.FingerprintSHA256(key.PublicKey()), nil); err != nil {
+		t.Fatalf("the pinned key was refused: %v", err)
+	}
+	if err := dial("", nil); err != nil {
+		t.Fatalf("the pinned key was not remembered: %v", err)
+	}
+}
+
+// The pinned key may be any of the server's host keys, not only the one a
+// connection asks for first; the rest of a run then keeps asking for it.
+func TestPinnedHostKeyOfAnyKind(t *testing.T) {
+	ed := newSigner(t)
+	ek, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ec, err := ssh.NewSignerFromKey(ek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := startServer(t, ec, ed)
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+	dial := func(p HostKeyPolicy) (ssh.PublicKey, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		p.KnownHostsPath = kh
+		c, err := Dial(ctx, srv.addr, Auth{User: "root", Password: "dummy-password"}, p)
+		if err != nil {
+			return nil, err
+		}
+		defer c.Close()
+		return c.HostKey, nil
+	}
+	for _, want := range []ssh.Signer{ed, ec} {
+		got, err := dial(HostKeyPolicy{Fingerprint: ssh.FingerprintSHA256(want.PublicKey())})
+		if err != nil || got.Type() != want.PublicKey().Type() {
+			t.Fatalf("pinned %s key: %v", want.PublicKey().Type(), err)
+		}
+		if _, err := dial(HostKeyPolicy{Expect: got}); err != nil {
+			t.Fatalf("a later connection that expects the %s key: %v", got.Type(), err)
+		}
+	}
+	if _, err := dial(HostKeyPolicy{Fingerprint: ssh.FingerprintSHA256(newSigner(t).PublicKey())}); !errors.Is(err, ErrHostKeyMismatch) {
+		t.Fatalf("a key the server does not have: %v", err)
+	}
+	// Only the Ed25519 key is on record now. A plain connection asks for
+	// that kind first, as OpenSSH does, instead of getting the ECDSA key and
+	// calling it a mismatch.
+	pr := &countingPrompter{}
+	if got, err := dial(HostKeyPolicy{Prompter: pr}); err != nil || got.Type() != ssh.KeyAlgoED25519 || pr.calls != 0 {
+		t.Fatalf("a plain connection with one of two keys on record: %v, %d questions", err, pr.calls)
 	}
 }
 
