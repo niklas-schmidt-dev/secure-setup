@@ -250,8 +250,13 @@ func TestStepOrder(t *testing.T) {
 	if localSteps[1] != "Update the system" || localSteps[len(localSteps)-1] != "Reboot and check after the boot" {
 		t.Fatalf("local steps: %q", localSteps)
 	}
-	if !plan.Default().UpdateSystem || !plan.Default().Reboot {
-		t.Fatal("the system update and the reboot check are not on by default")
+	if !plan.Default().UpdateSystem || !plan.Default().Reboot || !plan.Default().AutoUpdates {
+		t.Fatal("the system update, automatic updates and the reboot check are not on by default")
+	}
+	// Automatic updates are set up right after the update, before the
+	// firewall can close anything.
+	if remoteSteps[2] != autoUpdatesStep || localSteps[2] != autoUpdatesStep {
+		t.Fatalf("automatic updates: remote %q, local %q", remoteSteps[2], localSteps[2])
 	}
 }
 

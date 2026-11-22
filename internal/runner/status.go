@@ -34,6 +34,7 @@ type Status struct {
 	TailscaleSSH    bool     `json:"tailscale_ssh"`
 	KeysOnly        bool     `json:"sshd_keys_only"`
 	SSHPort         int      `json:"sshd_port"`
+	AutoUpdates     bool     `json:"automatic_updates"`
 	RebootRequired  bool     `json:"reboot_required"`
 }
 
@@ -59,6 +60,7 @@ func ReadStatus(ctx context.Context, host remote.Host) (*Status, error) {
 		CloudflareSync:  s.SyncTimer,
 		KeysOnly:        s.Hardened,
 		SSHPort:         s.SSHPort,
+		AutoUpdates:     s.AutoUpdates,
 		RebootRequired:  s.Reboot,
 		Problems:        []string{},
 	}
@@ -180,6 +182,7 @@ func (st *Status) Text() string {
 		line("Tailscale", v+"; Tailscale SSH "+onOff(st.TailscaleSSH))
 	}
 	line("sshd", fmt.Sprintf("port %d, %s", st.SSHPort, map[bool]string{true: "keys only", false: "password login unchanged"}[st.KeysOnly]))
+	line("Updates", map[bool]string{true: "install by themselves", false: "not automatic"}[st.AutoUpdates])
 	if st.RolledBack != "" {
 		line("Last rollback", st.RolledBack+" UTC")
 	}

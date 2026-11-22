@@ -301,6 +301,7 @@ func describe(p *plan.Plan) string {
 	fmt.Fprintf(&b, "  ping            %v\n", p.Firewall.AllowPing)
 	fmt.Fprintf(&b, "  sshd keys only  %v\n", p.SSH.Harden)
 	fmt.Fprintf(&b, "  system update   %v\n", p.UpdateSystem)
+	fmt.Fprintf(&b, "  auto updates    %v\n", p.AutoUpdates)
 	fmt.Fprintf(&b, "  reboot + check  %v\n", p.Reboot)
 	fmt.Fprintf(&b, "  rollback        %ds\n", p.Firewall.RollbackSeconds)
 	if p.Firewall.WANInterface != "" {
@@ -392,7 +393,7 @@ if [ -f /etc/systemd/system/secure-setup-cloudflared.service ]; then
 	echo "Cloudflare Tunnel service removed (cloudflared stays installed; delete the tunnel in the Cloudflare dashboard if you no longer need it)"
 fi
 rm -f /etc/systemd/system/secure-setup-bootcheck.service /etc/motd.d/secure-setup
-rm -rf /etc/secure-setup /var/lib/secure-setup
+` + remote.UndoAutoUpdatesScript + `rm -rf /etc/secure-setup /var/lib/secure-setup
 if [ -f /etc/ssh/sshd_config.d/00-secure-setup.conf ] || grep -q '^# secure-setup: added the next line$' /etc/ssh/sshd_config 2>/dev/null; then
 ` + remote.RevertSSHDScript + `	echo "sshd hardening removed"
 fi

@@ -82,6 +82,8 @@ type Result struct {
 	Hardened        bool
 	HardenNote      string // why hardening was skipped, if it was
 	WebPorts        []int
+	AutoUpdates     bool   // the distribution's unattended updates are on
+	AutoUpdatesNote string // why they were not set up, when the plan asked for them
 	RebootNeeded    bool   // the system update needs a reboot to finish
 	RebootChecked   bool   // rebooted, and the lockdown came back on its own
 	Tunnel          bool   // web traffic arrives through a Cloudflare Tunnel
@@ -148,6 +150,7 @@ func New(o Options) *Runner {
 	r.steps = []step{
 		{name: "Connect to the server", run: r.connect},
 		{name: "Update the system", skip: r.skipUpdate, run: r.updateSystem},
+		{name: autoUpdatesStep, skip: r.skipAutoUpdates, run: r.autoUpdates},
 		{name: "Install Tailscale", skip: func() string {
 			if ts.UseExisting {
 				return "using the existing private network " + ts.AdminAddress
@@ -703,6 +706,31 @@ func (r *Runner) updateSystem(ctx context.Context, log func(string)) error {
 		r.result.RebootNeeded = true
 		r.attention("the update needs a reboot to finish (new kernel or core libraries); reboot once the setup is done")
 	}
+	return nil
+}
+
+const autoUpdatesStep = "Turn on automatic updates"
+
+func (r *Runner) skipAutoUpdates() string {
+	if !r.o.Plan.AutoUpdates {
+		return "not requested"
+	}
+	return ""
+}
+
+// autoUpdates turns on the distribution's unattended updates. A system
+// secure-setup has no recipe for is noted in the summary, not a failure.
+func (r *Runner) autoUpdates(ctx context.Context, log func(string)) error {
+	note, err := remote.EnableAutoUpdates(ctx, r.server(), r.facts, log)
+	if err != nil {
+		return err
+	}
+	if note != "" {
+		r.result.AutoUpdatesNote = note
+		log("not set up: " + note)
+		return nil
+	}
+	r.result.AutoUpdates = true
 	return nil
 }
 

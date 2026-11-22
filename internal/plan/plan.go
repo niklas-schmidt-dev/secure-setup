@@ -25,6 +25,10 @@ type Plan struct {
 	Local bool `json:"local,omitempty"`
 	// UpdateSystem installs pending package updates before anything else.
 	UpdateSystem bool `json:"update_system"`
+	// AutoUpdates turns on the distribution's unattended updates
+	// (unattended-upgrades, dnf-automatic), so the server keeps getting
+	// security fixes after the one update of this run.
+	AutoUpdates bool `json:"auto_updates"`
 	// Reboot restarts the server at the end and checks that the lockdown
 	// comes back on its own.
 	Reboot    bool      `json:"reboot"`
@@ -112,6 +116,7 @@ type SSH struct {
 func Default() Plan {
 	return Plan{
 		UpdateSystem: true,
+		AutoUpdates:  true,
 		Reboot:       true,
 		Server:       Server{Port: 22, User: "root"},
 		Tailscale:    Tailscale{AdminInterface: "tailscale0", UDPPort: 41641},

@@ -73,6 +73,7 @@ func (r *Runner) localSteps() []step {
 	return []step{
 		{name: "Look around on this machine", run: r.hereDetect},
 		{name: "Update the system", skip: r.skipUpdate, run: r.updateSystem},
+		{name: autoUpdatesStep, skip: r.skipAutoUpdates, run: r.autoUpdates},
 		{name: "Install Tailscale", skip: func() string {
 			if ts.UseExisting {
 				return "using the existing private network " + ts.AdminAddress

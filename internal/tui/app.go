@@ -336,6 +336,9 @@ func (m *model) firewallForm() *huh.Form {
 	update := huh.NewConfirm().Title("Update the system first?").
 		Description("Installs pending package updates (apt upgrade, dnf upgrade, ...) before anything else. Recommended.").
 		Affirmative("Yes").Negative("No").Value(&m.plan.UpdateSystem)
+	auto := huh.NewConfirm().Title("Install security updates automatically from now on?").
+		Description("Turns on the system's own unattended updates (unattended-upgrades, dnf-automatic), so fixes keep arriving after this run. Recommended.").
+		Affirmative("Yes").Negative("No").Value(&m.plan.AutoUpdates)
 	reboot := huh.NewConfirm().Title("Reboot at the end and check that everything comes back?").
 		Description("The real test that the rules, Tailscale and sshd survive a restart. Recommended.").
 		Affirmative("Yes").Negative("No").Value(&m.plan.Reboot)
@@ -345,7 +348,7 @@ func (m *model) firewallForm() *huh.Form {
 		huh.NewInput().Title("Tunnel token or install command").Description("The whole \"Install as service\" command (sudo cloudflared service install eyJ...) or just the token. Leave empty on a rerun to keep the stored token.").
 			EchoMode(huh.EchoModePassword).Value(&m.tunnelToken),
 	).WithHideFunc(func() bool { return m.webChoice != "tunnel" })
-	return m.sized(huh.NewForm(huh.NewGroup(fields...), tunnel, huh.NewGroup(update, reboot)).WithShowHelp(true))
+	return m.sized(huh.NewForm(huh.NewGroup(fields...), tunnel, huh.NewGroup(update, auto, reboot)).WithShowHelp(true))
 }
 
 func (m *model) reviewForm() *huh.Form {
@@ -411,6 +414,7 @@ func (m *model) summary() string {
 	line("Ping", yesNo(p.Firewall.AllowPing))
 	line("Password login", map[bool]string{true: "disabled (keys only)", false: "unchanged"}[p.SSH.Harden])
 	line("System update", map[bool]string{true: "first, before anything is installed", false: "skipped"}[p.UpdateSystem])
+	line("Automatic updates", map[bool]string{true: "turned on", false: "unchanged"}[p.AutoUpdates])
 	line("Reboot", map[bool]string{true: "at the end, then check that everything comes back", false: "no"}[p.Reboot])
 	line("Everything else", "dropped")
 	line("Rollback window", fmt.Sprintf("%d seconds", p.Firewall.RollbackSeconds))
@@ -1026,6 +1030,11 @@ func Summary(p *plan.Plan, r *runner.Result) string {
 		line("Tailscale SSH", "on: logins over the tailnet follow your tailnet policy")
 	case r.TailscaleSSH != "":
 		warn("Tailscale SSH", r.TailscaleSSH)
+	}
+	if r.AutoUpdates {
+		line("Updates", "install by themselves from now on")
+	} else if r.AutoUpdatesNote != "" {
+		warn("Updates", "not automatic: "+r.AutoUpdatesNote)
 	}
 	switch {
 	case r.RebootChecked:

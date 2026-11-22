@@ -38,6 +38,8 @@ type State struct {
 	SSHPort    int
 	Tailscale  bool // CLI installed
 	Reboot     bool // the system asks for a reboot
+	// AutoUpdates: the unattended updates secure-setup sets up are on.
+	AutoUpdates bool
 }
 
 var stateScript = `
@@ -62,9 +64,10 @@ sshd_bin=$(command -v sshd || echo /usr/sbin/sshd)
 printf 'SSHPORT=%s\n' "$("$sshd_bin" -T 2>/dev/null | awk '$1=="port"{print $2; exit}')"
 if command -v tailscale >/dev/null 2>&1; then echo TAILSCALE=1; fi
 if [ -f /var/run/reboot-required ] || { command -v needs-restarting >/dev/null 2>&1 && ! needs-restarting -r >/dev/null 2>&1; }; then echo REBOOT=1; fi
+if ` + AutoUpdatesOnTest + `; then echo AUTO_UPDATES=1; fi
 `
 
-var stateKeys = []string{"HOSTNAME", "PRETTY", "TABLE", "RULE", "CF4", "CF6", "NFT_BOOT", "PERSISTED", "ROLLBACK_PENDING", "ROLLED_BACK", "SYNC_TIMER", "SYNC_RESULT", "TUNNEL", "HARDENED", "SSHPORT", "TAILSCALE", "REBOOT"}
+var stateKeys = []string{"HOSTNAME", "PRETTY", "TABLE", "RULE", "CF4", "CF6", "NFT_BOOT", "PERSISTED", "ROLLBACK_PENDING", "ROLLED_BACK", "SYNC_TIMER", "SYNC_RESULT", "TUNNEL", "HARDENED", "SSHPORT", "TAILSCALE", "REBOOT", "AUTO_UPDATES"}
 
 // ReadState reads the State of the server in one round trip.
 func ReadState(ctx context.Context, c Host) (*State, error) {
@@ -98,6 +101,7 @@ func ReadState(ctx context.Context, c Host) (*State, error) {
 		Hardened:        kv["HARDENED"] == "1",
 		Tailscale:       kv["TAILSCALE"] == "1",
 		Reboot:          kv["REBOOT"] == "1",
+		AutoUpdates:     kv["AUTO_UPDATES"] == "1",
 	}
 	s.CloudflareV4, _ = strconv.Atoi(kv["CF4"])
 	s.CloudflareV6, _ = strconv.Atoi(kv["CF6"])
