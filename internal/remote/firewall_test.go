@@ -186,6 +186,24 @@ func TestConfirmRetiresAndMasks(t *testing.T) {
 	}
 }
 
+// A confirmed plan without the Cloudflare refresh switches off the timer an
+// earlier run enabled; one with it enables the timer.
+func TestConfirmSwitchesTheSyncTimer(t *testing.T) {
+	for sync, want := range map[bool]string{
+		false: "systemctl disable --now " + SyncUnit + ".timer",
+		true:  "systemctl enable --now " + SyncUnit + ".timer",
+	} {
+		h := &recordHost{}
+		if err := ConfirmFirewall(context.Background(), h, &Facts{}, sync, func(string) {}); err != nil {
+			t.Fatal(err)
+		}
+		s := h.all()
+		if stop, at := strings.Index(s, "systemctl stop "+RollbackUnit+".timer"), strings.Index(s, want); stop < 0 || at < stop {
+			t.Fatalf("sync %v: %q must come after the confirmation:\n%s", sync, want, s)
+		}
+	}
+}
+
 func TestDetectReadsFirewalldEnablement(t *testing.T) {
 	if !strings.Contains(detectScript, "is-enabled --quiet firewalld") {
 		t.Fatal("detect does not ask whether firewalld is enabled at boot")

@@ -235,7 +235,12 @@ if [ -e %[3]s ] || [ -e %[4]s ]; then
 	echo "firewalld disabled and masked so it cannot replace the rules at boot (nftables takes over)"
 fi
 `, UFWWasActive, UFWRetired, FirewalldWasActive, FirewalldWasEnabled, FirewalldRetired)
-	sync := ""
+	// A plan without the refresh switches off the timer an earlier run left.
+	sync := fmt.Sprintf(`if systemctl is-enabled --quiet %[1]s.timer 2>/dev/null || systemctl is-active --quiet %[1]s.timer 2>/dev/null; then
+	systemctl disable --now %[1]s.timer >/dev/null 2>&1 || true
+	echo "daily Cloudflare range refresh switched off: this plan does not use it"
+fi
+`, SyncUnit)
 	if cloudflareSync {
 		sync = fmt.Sprintf(`systemctl enable --now %s.timer >/dev/null 2>&1
 echo "daily Cloudflare range refresh enabled (%s.timer)"
