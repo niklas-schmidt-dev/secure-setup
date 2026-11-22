@@ -6,8 +6,10 @@
 
 The wizard saves its answers (without secrets) to
 `~/.config/secure-setup/<host>.json`, or `/etc/secure-setup/plan.json` on the
-server. Edit the target address before replaying a remote plan on another
-server. The internet interface is detected on each server and not saved; a
+server, and fills them in again the next time it runs for that server. A
+field the plan format does not know stops the run: a misspelt name would
+otherwise leave its default in force. The internet interface is detected on
+each server and not saved; a
 `wan_interface` you put in a plan must exist on the target, and if it differs
 from the interface of the default route the run stops unless the plan also
 sets `"wan_interface_override": true`. Further internet-facing interfaces
@@ -19,6 +21,26 @@ Replay a saved plan with:
 secure-setup apply -f ~/.config/secure-setup/vps.json --yes
 ```
 
+### One plan for several servers
+
+`--host` replaces the plan's server address, so the same file serves every
+server of a kind. Leave `tailscale.hostname` out of such a plan: each server
+then joins the tailnet under its own host name.
+
+```sh
+secure-setup apply -f fleet.json --host 203.0.113.20 --host-key SHA256:... --yes
+```
+
+`--host-key` (or `server.host_key` in the plan) names the host key the server
+must present, as `ssh-keygen -lf` prints its fingerprint. The first
+connection then accepts that key only; without it, `--yes` trusts the first
+key it sees. Any of the server's host keys can be named. Print them on the
+server's console with:
+
+```sh
+for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf "$f"; done
+```
+
 Secrets come from the environment in non-interactive mode:
 `SECURE_SETUP_PASSWORD`, `SECURE_SETUP_PASSPHRASE`, `TS_AUTHKEY`,
 `CLOUDFLARE_TUNNEL_TOKEN`. Set these in the process environment; do not put
@@ -26,14 +48,17 @@ secrets in saved plans or commit them to the repository.
 
 ### Plan defaults and confirmation
 
-The default plan enables package updates, a final reboot, SSH hardening,
-HTTPS from Cloudflare, rate-limited ping and daily Cloudflare range refresh.
+The default plan enables package updates, automatic security updates, a
+final reboot, SSH hardening, HTTPS from Cloudflare, rate-limited ping and
+daily Cloudflare range refresh.
 SSH uses `tailscale0`; Tailscale SSH is opt-in. The default rollback window
 is 120 seconds. The wizard offers 60, 120 and 300 seconds; a saved plan can
 specify 30–900 seconds.
 
 `secure-setup apply -f plan.json` prompts before applying. Add `--yes` for
-unattended use; on a remote run it also accepts first-seen SSH host keys.
+unattended use; on a remote run it also accepts first-seen SSH host keys,
+and it stops when this computer is not on the tailnet instead of asking to
+try again.
 Changed, revoked, certificate or unparseable known host keys are refused
 before credentials are sent. Remote runs still verify a fresh private
 connection; `--yes` does not replace that with local self-checks.
@@ -44,10 +69,51 @@ the `--confirm login|self` flag can choose the local confirmation mode
 explicitly. `--no-tui` uses plain text. See [the confirmation requirements](recovery.md#how-access-is-confirmed)
 before choosing unattended setup.
 
-Set `"update_system": false` or `"reboot": false` in a saved plan to skip
-those steps. `cloudflare_tunnel` replaces `web_ports`: leave `web_ports`
-empty when enabling a tunnel. The token comes from the environment or the
-wizard, not from the JSON file.
+Set `"update_system": false`, `"auto_updates": false` or `"reboot": false`
+in a saved plan to skip those steps. `cloudflare_tunnel` replaces
+`web_ports`: leave `web_ports` empty when enabling a tunnel. The token comes
+from the environment or the wizard, not from the JSON file.
+
+### Automatic updates
+
+`auto_updates` turns on the system's own unattended updates, so fixes keep
+arriving after the one update of the run. On Debian and Ubuntu that is
+unattended-upgrades, which installs security updates every day. On Fedora
+and the RHEL family it is dnf-automatic, which installs all updates. The
+server is not rebooted by them. Other package managers are left alone, and
+the result says so.
+
+### Ports open to everyone
+
+`firewall.public_tcp_ports` and `firewall.public_udp_ports` open ports to the
+whole internet, for a service that cannot sit behind Cloudflare or the
+tailnet: mail, a game server, WireGuard. They exist in the plan file only;
+the wizard does not ask for them but shows them on the review. A port cannot
+be a web port at the same time, and the SSH port is refused.
+
+```json
+"firewall": { "public_tcp_ports": [25, 587], "public_udp_ports": [51820] }
+```
+
+## Checking a server
+
+```sh
+secure-setup status --host YOUR_TAILNET_IP
+secure-setup status -f ~/.config/secure-setup/vps.json --json
+secure-setup status --here
+```
+
+`status` reads everything from the server: whether the rules are loaded and
+come back at boot, the admin rule, the web ports and the Cloudflare ranges,
+public ports, the tunnel, Tailscale, sshd's effective policy, automatic
+updates and a pending reboot. It needs no plan, changes nothing, lists what
+is wrong and exits with 1 when it found a problem. With `-f`, the port, user
+and key come from the plan and the address is the private one: the existing
+network's address, or the server's name in the tailnet.
+
+Every run writes a log of its steps, output and notices to
+`~/.config/secure-setup/logs/` (the newest 20 are kept) and names the file
+when it ends.
 
 ## What ends up on the server
 
@@ -58,6 +124,7 @@ wizard, not from the JSON file.
 | `/usr/local/sbin/secure-setup-cloudflare-sync` | refreshes the ranges; run daily by `secure-setup-cloudflare-sync.timer` |
 | `/etc/ssh/sshd_config.d/00-secure-setup.conf` | password login off, root login with keys only |
 | `/var/lib/secure-setup/` | rollback script and the previous ruleset; `decided` once the confirmation or the rollback timer claimed an apply's outcome; `rolled-back` appears if a rollback ever fired |
+| `/etc/apt/apt.conf.d/52secure-setup-auto-upgrades` | with `auto_updates` on Debian and Ubuntu: turns unattended-upgrades on. On Fedora and the RHEL family the dnf-automatic timer is enabled instead (`/etc/dnf/dnf5-plugins/automatic.conf` with dnf 5) |
 | `/etc/secure-setup/plan.json` | the answers of a `here` run, for `secure-setup here -f` next time |
 | `/etc/secure-setup/cloudflared.token` | optional Cloudflare Tunnel token, mode 0600, read by cloudflared through `--token-file` |
 | `secure-setup-cloudflared.service` | optional outbound tunnel; connects before the firewall is applied and is checked again after reboot |

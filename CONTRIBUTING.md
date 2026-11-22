@@ -20,6 +20,9 @@ scripts/validate-ruleset.sh
 # Remote setup against a throwaway systemd server (Docker)
 test/e2e/run.sh
 
+# The same over the server's IPv6 addresses
+E2E_IPV6=1 test/e2e/run.sh
+
 # Local setup: login, confirmation, self-checks, rollback, TUI and undo
 test/e2e/run-here.sh
 ```
@@ -28,9 +31,11 @@ The end-to-end tests build a Debian container with systemd and sshd on two
 networks (a "public" and a "private" one standing in for the tailnet), lock
 it down, prove the public port is closed, force a lockout to watch the
 rollback fire, and run `undo`. Docker commands use `DOCKER_CONTEXT` (default
-`nas-docker`). CI runs all three on every pull request, on the runner's own
+`nas-docker`). CI runs all of them on every pull request, on the runner's own
 Docker (`DOCKER_CONTEXT=default`). The e2e networks use `10.250.100.0/24` and
-`10.250.101.0/24`; override with `E2E_SUBNET_PUBLIC` and `E2E_SUBNET_PRIVATE`.
+`10.250.101.0/24`; override with `E2E_SUBNET_PUBLIC` and `E2E_SUBNET_PRIVATE`
+(`E2E_SUBNET6_PUBLIC` and `E2E_SUBNET6_PRIVATE` for the IPv6 run, default
+`fd00:250:100::/64` and `fd00:250:101::/64`).
 They need Docker 28 or newer. The commands below use this project's MacBook
 Docker target, `nas-docker`; Docker Desktop is not used. If that daemon is
 unreachable, resolve the NAS connection rather than switching contexts.
@@ -46,9 +51,9 @@ docker --context nas-docker build -t secure-setup-e2e-client -f test/e2e/Dockerf
 Layout:
 
 ```
-main.go                 commands: wizard, here, confirm, apply, render, undo
+main.go                 commands: wizard, here, confirm, apply, render, status, undo
 internal/tui            the wizard (bubbletea + huh)
-internal/textui         plain-text reporter and prompts for apply/undo
+internal/textui         plain-text reporter and prompts for apply/undo, the run log
 internal/runner         the steps: over SSH (runner.go) and on the machine itself (here.go)
 internal/remote         what runs on the server, with the embedded scripts and units
 internal/localhost      runs those steps on this machine (`here`)

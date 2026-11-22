@@ -53,9 +53,10 @@ For the recommended setup from your computer, have:
 - A Cloudflare-managed hostname if you want to serve a website through
   Cloudflare. You do not need one when choosing no web traffic.
 
-The wizard proposes system package updates and a reboot by default. Review
-both choices before applying the plan. This tool changes the server's
-firewall and SSH configuration; it is intended for a fresh server.
+The wizard proposes system package updates, automatic security updates and a
+reboot by default. Review these choices before applying the plan. This tool
+changes the server's firewall and SSH configuration; it is intended for a
+fresh server.
 
 ## Get started
 
@@ -118,8 +119,9 @@ record and origin TLS configuration for the web mode you choose.
 ### 5. Review, apply and verify
 
 Review the selected ports, SSH hardening, updates, reboot and rollback window.
-When you apply the plan, secure-setup validates the rules, arms the rollback
-timer and loads the firewall.
+The review offers Apply, Change the answers (back to the questions, with
+your answers kept) and Quit. When you apply the plan, secure-setup validates
+the rules, arms the rollback timer and loads the firewall.
 
 It then opens a fresh SSH connection over the tailnet. After that connection
 confirms the setup, the timer is cancelled and the rules are persisted. It
@@ -140,6 +142,16 @@ Replace both placeholders. Add `-p YOUR_SSH_PORT` if you use a non-default port.
 An existing public SSH session may remain open; the relevant check is whether
 a *new* public connection is blocked.
 
+Check the server at any later time:
+
+```sh
+secure-setup status --host YOUR_TAILNET_IP
+```
+
+It shows the loaded rules, Tailscale, sshd's policy and the updates, lists
+what is wrong, and changes nothing. The run also leaves a log of its steps
+in `~/.config/secure-setup/logs/`.
+
 ## Other setup paths
 
 ### Already logged in to the server?
@@ -152,7 +164,9 @@ curl -fsSL https://raw.githubusercontent.com/niklas-schmidt-dev/secure-setup/mai
 
 While the rollback timer is running, log in from another device over the
 tailnet. When using Tailscale SSH, run `secure-setup confirm` in that new
-session. If sudo removes `SSH_CONNECTION`, use
+session. The command refuses an SSH connection that was already open when
+the rules went live, because such a connection stays open under any rules;
+open a new one. If sudo removes `SSH_CONNECTION`, use
 `sudo --preserve-env=SSH_CONNECTION secure-setup confirm`.
 
 A local run cannot check its own public SSH exposure from outside. Test a new
@@ -184,9 +198,12 @@ except the explicit network allowances below. The tunnel option replaces
 the open web port with an outbound connection.
 
 - Loopback, established and related traffic, required ICMP and DHCP replies
-  are allowed. Ping is optional and rate limited.
+  (IPv4 and IPv6) are allowed. Ping is optional and rate limited.
 - UDP 41641 stays open for authenticated direct Tailscale connections.
-- Extra private ports are configurable. Outbound traffic is allowed.
+- Extra private ports are configurable. A plan file can also name ports that
+  are open to the whole internet (`public_tcp_ports`, `public_udp_ports`),
+  for a service that cannot sit behind Cloudflare or the tailnet; the review
+  and the result say so. Outbound traffic is allowed.
 - Docker's own rules remain in place. Forwarded traffic from public uplinks
   is restricted to Cloudflare on the allowed web ports; private-side traffic
   is handled separately.
@@ -214,24 +231,30 @@ secure-setup render -f plan.json
 | --- | --- |
 | `secure-setup` | Start the remote setup wizard on your computer. |
 | `secure-setup here` | Start the wizard on the Linux server itself. |
-| `secure-setup apply -f plan.json` | Apply a saved plan; add `--yes` for unattended confirmation of prompts. |
+| `secure-setup apply -f plan.json` | Apply a saved plan; add `--yes` for unattended confirmation of prompts, `--host ADDR` to use the plan for another server, `--host-key SHA256:...` to name the host key the server must present. |
 | `secure-setup here -f plan.json` | Apply a saved plan locally. |
 | `secure-setup here --yes` | Run locally with defaults and self-checks. |
 | `secure-setup confirm` | Confirm a waiting local setup from a new private SSH session. |
 | `secure-setup render -f plan.json` | Print the generated nftables ruleset. |
+| `secure-setup status --host YOUR_TAILNET_IP` | Show a server's lockdown and what is wrong with it; exits with 1 on a problem. `--here` on the server, `--json` for scripts. |
 | `secure-setup undo --host YOUR_TAILNET_IP` | Undo secure-setup's firewall and SSH changes over SSH. |
 | `secure-setup undo --here` | Undo the changes from the server itself. |
 
+`status` and `undo` also take `-f plan.json` in place of `--host`: the port,
+user and key come from the plan, and the address is the server's private one.
+
 The wizard saves remote plans to `~/.config/secure-setup/<host>.json` and local
-plans to `/etc/secure-setup/plan.json`. Edit the target before reusing a remote
-plan on a different server. Non-interactive secrets come from
+plans to `/etc/secure-setup/plan.json`, and starts from them the next time you
+set up the same server. To reuse a remote plan on a different server, pass
+`--host` to `apply`. Non-interactive secrets come from
 `SECURE_SETUP_PASSWORD`, `SECURE_SETUP_PASSPHRASE`, `TS_AUTHKEY` and
 `CLOUDFLARE_TUNNEL_TOKEN`.
 
 See the [plan and configuration reference](docs/reference.md) for replaying
 plans, interface detection and non-interactive options. With remote
-<code>apply --yes</code>, first-seen host keys are accepted automatically;
-changed or invalid known host keys are still refused.
+<code>apply --yes</code>, first-seen host keys are accepted automatically
+unless you name the key with <code>--host-key</code>; changed or invalid
+known host keys are still refused.
 
 <a id="install"></a>
 
@@ -286,8 +309,8 @@ or every change made during setup. It does not revert package upgrades.
 Unattended self-checks do not prove inbound tailnet access. Keep your provider
 console available if a boot check or private login fails.
 
-`undo` removes secure-setup's firewall, timers and SSH hardening changes and
-leaves Tailscale installed. It can make the server publicly reachable again.
+`undo` removes secure-setup's firewall, timers, SSH hardening and automatic
+update settings and leaves Tailscale installed. It can make the server publicly reachable again.
 Review its prompt before continuing. A previously retired ufw is re-enabled;
 firewalld is unmasked but must be started manually.
 
@@ -303,7 +326,7 @@ For confirmation modes, boot-check logs and recovery commands, see the
 
 | Guide | What it covers |
 | --- | --- |
-| [Networking](docs/networking.md) | Cloudflare IP ranges and tunnels, Docker, Tailscale SSH and existing private networks. |
+| [Networking](docs/networking.md) | Cloudflare IP ranges and tunnels, Docker, Tailscale SSH, existing private networks and servers without IPv4. |
 | [Reference](docs/reference.md) | Saved plans, environment variables, supported platforms and server changes. |
 | [Recovery](docs/recovery.md) | Confirmation modes, rollback, reboot checks and undo. |
 | [Security](SECURITY.md) | Threat model, release provenance and private vulnerability reporting. |

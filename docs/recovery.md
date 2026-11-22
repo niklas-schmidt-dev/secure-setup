@@ -21,7 +21,12 @@ They differ in how they confirm that the new rules let you in:
   for a login from a machine other than this one, over a connection that
   opened after the rules went live. A TCP connection that never logs in does
   not count. With Tailscale SSH, run `secure-setup confirm` in the new
-  session. Password login is only turned
+  session. That command also needs a new connection: it refuses one that was
+  open before or while the rules went live, including a new session on such
+  a connection (ssh's `ControlMaster`), and says so. A Tailscale SSH session
+  ends inside tailscaled and is not in the server's connection table, so
+  there the command is your own statement that you got in. Password login is
+  only turned
   off when `authorized_keys` holds a key sshd would accept for your account
   (read as that account, no restricting options), or when this run turns
   Tailscale SSH on; if the run then fails or rolls back, password login is
@@ -60,9 +65,19 @@ step: if something did not come back, use the provider console.
 
 If step 4 fails, the timer runs `/var/lib/secure-setup/rollback.sh`, which
 restores the saved table (or removes the new one) and writes
-`/var/lib/secure-setup/rolled-back`. secure-setup reports that and exits
-non-zero. The previous firewall state is restored; this is not a rollback
-of every change made during setup.
+`/var/lib/secure-setup/rolled-back`. secure-setup waits for that marker,
+reports the rollback and exits non-zero. The previous firewall state is
+restored; this is not a rollback of every change made during setup.
+
+A run that finds the rules of an earlier run still waiting for their
+confirmation, for example after that run lost its connection, waits until
+the rollback timer has settled them before it changes anything. It then
+starts from the confirmed state, not from rules nobody confirmed.
+
+Sessions that are open when the rules go live stay open: staging switches
+connection tracking on first, so they are known as established connections
+by then. A session that has been idle since before that can still be cut;
+it is the new connection over the tailnet that counts.
 
 The wizard offers 60 seconds, 2 minutes or 5 minutes. A saved plan can
 choose a window from 30 to 900 seconds. Package upgrades are not undone.
@@ -111,6 +126,7 @@ sudo --preserve-env=SSH_CONNECTION secure-setup confirm
 | --- | --- |
 | The new private connection cannot be confirmed | Let the active rollback timer restore the previous firewall. Read the reported error before retrying. |
 | A rollback was reported | `/var/lib/secure-setup/rolled-back` records that rollback fired. Confirm access and correct the plan before rerunning. |
+| You want to know the state of a server | `secure-setup status --host YOUR_TAILNET_IP`, or `--here` on the server, lists what is in place and what is wrong. The log of each run is in `~/.config/secure-setup/logs/`. |
 | A local run rebooted the server | Inspect `/var/log/secure-setup-bootcheck.log` and the login message in `/etc/motd.d/secure-setup`. |
 | Cloud-init failed or did not finish | Inspect `/var/log/secure-setup-firstboot.log` and test access from another machine. The server retains its provider-image exposure until setup succeeds. |
 | Private SSH fails after reboot or unattended setup | Use the provider console to inspect Tailscale, sshd, nftables and the tailnet policy. Self-checks cannot validate your inbound ACL. |
@@ -134,8 +150,10 @@ secure-setup undo --here
 ```
 
 Both commands ask before continuing. Remote undo supports `--port` and
-`--key` if your connection needs them. Undo removes secure-setup's firewall,
-timers and SSH hardening changes and leaves Tailscale installed. It can make
+`--key` if your connection needs them, or `-f plan.json` to take them and
+the private address from the plan. Undo removes secure-setup's firewall,
+timers, SSH hardening and automatic update settings and leaves Tailscale
+installed. It can make
 the server publicly reachable again; review the prompt and the restored
 policy before relying on it.
 
