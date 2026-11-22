@@ -182,5 +182,7 @@ func SSHSession() (client, server netip.AddrPort) {
 	if err1 != nil || err2 != nil {
 		return netip.AddrPort{}, netip.AddrPort{}
 	}
-	return netip.AddrPortFrom(c.Addr().Unmap(), c.Port()), netip.AddrPortFrom(s.Addr().Unmap(), s.Port())
+	// Without the zone of a link-local address: the connection table of
+	// the server, which these are compared with, has none.
+	return netip.AddrPortFrom(c.Addr().Unmap().WithZone(""), c.Port()), netip.AddrPortFrom(s.Addr().Unmap().WithZone(""), s.Port())
 }

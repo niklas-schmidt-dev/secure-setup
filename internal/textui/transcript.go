@@ -33,6 +33,11 @@ func TranscriptDir() string { return filepath.Join(plan.ConfigDir(), "logs") }
 func OpenTranscript(name string, steps []string) *Transcript {
 	t := &Transcript{steps: steps}
 	dir := TranscriptDir()
+	// Without a home directory (some first-boot environments) there is no
+	// place of the user's own, and the current directory is not one.
+	if !filepath.IsAbs(dir) {
+		return t
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return t
 	}

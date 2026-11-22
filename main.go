@@ -174,9 +174,9 @@ func runHereText(ctx context.Context, p *plan.Plan, host *localhost.Host, yes bo
 func reportWithLog(opts *runner.Options, name string) *textui.Transcript {
 	steps := runner.New(*opts).Steps()
 	log := textui.OpenTranscript(name, steps)
-	print := textui.Reporter(os.Stdout, steps)
+	show := textui.Reporter(os.Stdout, steps)
 	opts.Report = func(e runner.Event) {
-		print(e)
+		show(e)
 		log.Event(e)
 	}
 	return log

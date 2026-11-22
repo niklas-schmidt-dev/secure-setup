@@ -66,4 +66,14 @@ func TestTranscript(t *testing.T) {
 	if none.Path != "" {
 		t.Fatalf("log at %q", none.Path)
 	}
+	// No home directory at all: no log in the current directory.
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("HOME", "")
+	t.Chdir(t.TempDir())
+	if homeless := OpenTranscript("x", nil); homeless.Path != "" {
+		t.Fatalf("log at %q without a home directory", homeless.Path)
+	}
+	if entries, _ := os.ReadDir("."); len(entries) != 0 {
+		t.Fatalf("files in the current directory: %v", entries)
+	}
 }
