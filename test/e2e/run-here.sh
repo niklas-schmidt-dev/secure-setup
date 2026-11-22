@@ -176,10 +176,16 @@ d exec "$srv" grep -q "Confirmed by.*self-checks" /root/run3.log || fail "summar
 d exec "$srv" systemctl is-active --quiet secure-setup-rollback.timer && fail "rollback timer still armed after self-confirm" || echo "   self-confirmed; timer cancelled"
 if d exec "$cli" nc -z -w 5 "$pubip" 22; then fail "public ssh open after self-confirm"; else echo "   public ssh still blocked"; fi
 
-echo "== run 4: apply -f with a local plan takes the same path"
-d exec "$srv" sh -c 'secure-setup apply -f /root/plan-self.json --yes > /root/run4.log 2>&1; echo "EXIT=$?" >> /root/run4.log' || true
+echo "== run 4: apply -f with a local plan takes the same path; without web ports the refresh timer goes"
+d exec "$srv" sh -c 'sed "s/\"web_ports\": \[443\]/\"web_ports\": []/" /root/plan-self.json > /root/plan-noweb.json'
+d exec "$srv" grep -q '"web_ports": \[\]' /root/plan-noweb.json || fail "plan without web ports not written"
+d exec "$srv" sh -c 'secure-setup apply -f /root/plan-noweb.json --yes > /root/run4.log 2>&1; echo "EXIT=$?" >> /root/run4.log' || true
 d exec "$srv" grep -q "EXIT=0" /root/run4.log || { d exec "$srv" tail -20 /root/run4.log; fail "apply with local plan failed"; }
-echo "   ok"
+d exec "$srv" grep -q "daily Cloudflare range refresh switched off" /root/run4.log || { d exec "$srv" tail -20 /root/run4.log; fail "the refresh timer of the earlier run was not switched off"; }
+d exec "$srv" systemctl is-enabled --quiet secure-setup-cloudflare-sync.timer && fail "refresh timer still enabled without web ports"
+d exec "$srv" systemctl is-active --quiet secure-setup-cloudflare-sync.timer && fail "refresh timer still active without web ports"
+d exec "$srv" nft list chain inet secure_setup input | grep -q cloudflare && fail "web rule present without web ports"
+echo "   ok; no web rule, refresh timer off"
 
 echo "== run 5: the wizard (TUI) on the server, driven by expect, confirmed by a login"
 d cp test/e2e/here-tui.exp "$srv:/root/here-tui.exp"
