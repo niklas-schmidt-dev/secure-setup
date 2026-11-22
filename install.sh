@@ -107,7 +107,16 @@ main() {
   trap 'rm -rf "$tmp"' EXIT
 
   say "Downloading $NAME ($version, $os/$arch)..."
-  fetch "$base/$archive" "$tmp/$archive" || die "download failed: $base/$archive"
+  fetch "$base/$archive" "$tmp/$archive" || {
+    # GitHub serves release downloads over IPv4 only.
+    if [ "$os" = linux ] && command -v ip >/dev/null 2>&1 && [ -z "$(ip -4 route show default 2>/dev/null)" ]; then
+      die "download failed: $base/$archive
+  This machine has no IPv4 route, and GitHub's release downloads have no IPv6 address.
+  Set it up from your computer instead (secure-setup there reaches it over SSH), or copy
+  the binary over: https://github.com/$REPO/blob/main/docs/networking.md#ipv6-only-servers"
+    fi
+    die "download failed: $base/$archive"
+  }
   fetch "$base/checksums.txt" "$tmp/checksums.txt" || die "download failed: $base/checksums.txt"
 
   expected=$(awk -v f="$archive" '$2 == f { print $1 }' "$tmp/checksums.txt")

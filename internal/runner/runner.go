@@ -1036,6 +1036,9 @@ func (r *Runner) verify(ctx context.Context, log func(string)) error {
 	// (The connection from step 1 survives: it is an established flow.)
 	pubIP := r.facts.WANIPv4
 	if pubIP == "" {
+		pubIP = r.facts.WANIPv6 // a server without IPv4
+	}
+	if pubIP == "" {
 		pubIP = "<public address>"
 	}
 	public := fmt.Sprintf("`nc -zv %s %d`", pubIP, r.facts.SSHPort)

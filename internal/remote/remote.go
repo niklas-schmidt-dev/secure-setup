@@ -66,6 +66,7 @@ type Facts struct {
 	WANIfaces  []string // every device with a default route (IPv4 and IPv6), WANIface first
 	PublicNICs []string // network cards with a public address, with or without a default route
 	WANIPv4    string   // first IPv4 address on WANIface, when known
+	WANIPv6    string   // first global IPv6 address on the IPv6 default-route interface, when known
 	Docker     bool
 
 	Tailscale      bool   // CLI installed
@@ -103,6 +104,8 @@ printf 'WAN6=%s\n' "$(ip -o -6 route show default 2>/dev/null | awk '{for(i=1;i<
 printf 'WANS=%s\n' "$({ ip -o -4 route show default; ip -o -6 route show default; } 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); break}}' | tr '\n' ' ')"
 wan=$(ip -o -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
 if [ -n "$wan" ]; then printf 'WANIP=%s\n' "$(ip -o -4 addr show dev "$wan" 2>/dev/null | awk '{print $4; exit}' | cut -d/ -f1)"; fi
+wan6=$(ip -o -6 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+if [ -n "$wan6" ]; then printf 'WANIP6=%s\n' "$(ip -o -6 addr show dev "$wan6" scope global 2>/dev/null | awk '{print $4; exit}' | cut -d/ -f1)"; fi
 sysnet=/sys/class/net
 ` + onCardScript + `printf 'NICADDRS=%s\n' "$(ip -o addr show scope global 2>/dev/null | while read -r _ dev _ addr _; do dev=${dev%%@*}; if oncard "$dev" 0; then printf '%s %s ' "$dev" "$addr"; fi; done)"
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then echo UFW=1; else echo UFW=0; fi
@@ -129,7 +132,7 @@ const onCardScript = `oncard() {
 
 // detectKeys are the facts detectScript prints. Other lines are ignored, so
 // a server cannot fill the map with keys of its own.
-var detectKeys = []string{"ID", "ID_LIKE", "CODENAME", "PRETTY", "HOSTNAME", "SYSTEMD", "PKG", "NFT", "TAILSCALE", "DOCKER", "SSHPORT", "WAN", "WAN6", "WANS", "WANIP", "NICADDRS", "UFW", "FIREWALLD", "FIREWALLD_ENABLED", "SS_TABLE", "ROLLED_BACK", "ROLLBACK_ARMED"}
+var detectKeys = []string{"ID", "ID_LIKE", "CODENAME", "PRETTY", "HOSTNAME", "SYSTEMD", "PKG", "NFT", "TAILSCALE", "DOCKER", "SSHPORT", "WAN", "WAN6", "WANS", "WANIP", "WANIP6", "NICADDRS", "UFW", "FIREWALLD", "FIREWALLD_ENABLED", "SS_TABLE", "ROLLED_BACK", "ROLLBACK_ARMED"}
 
 // Detect gathers Facts about the server. Their text is shown in the wizard's
 // forms, so control characters are replaced (see Printable).
@@ -162,6 +165,7 @@ func Detect(ctx context.Context, c Host) (*Facts, error) {
 		RollbackArmed:    kv["ROLLBACK_ARMED"] == "1",
 		WANIface:         kv["WAN"],
 		WANIPv4:          kv["WANIP"],
+		WANIPv6:          kv["WANIP6"],
 	}
 	if f.WANIface == "" {
 		f.WANIface = kv["WAN6"]

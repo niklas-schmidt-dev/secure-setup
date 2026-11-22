@@ -142,7 +142,10 @@ func (r *Runner) hereDetect(ctx context.Context, log func(string)) error {
 	if err := resolveWAN(ctx, r.local, p, f, log); err != nil {
 		return err
 	}
-	r.result.PublicAddress = f.WANIPv4
+	// A server without IPv4 has its IPv6 address as the public one.
+	if r.result.PublicAddress = f.WANIPv4; f.WANIPv4 == "" {
+		r.result.PublicAddress = f.WANIPv6
+	}
 	r.result.SSHPort = f.SSHPort
 	if !containsInt(p.Firewall.TailnetPorts, f.SSHPort) {
 		p.Firewall.TailnetPorts = append(p.Firewall.TailnetPorts, f.SSHPort)

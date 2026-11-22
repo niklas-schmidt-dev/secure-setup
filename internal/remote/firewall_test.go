@@ -231,6 +231,19 @@ func TestDetectListsEveryDefaultRouteDevice(t *testing.T) {
 	}
 }
 
+// A server without IPv4 has its IPv6 default-route interface as the internet
+// interface and its IPv6 address as the public one.
+func TestDetectIPv6Only(t *testing.T) {
+	out := "SYSTEMD=1\nWAN=\nWAN6=ens3\nWANS=ens3 \nWANIP6=2001:db8::10\n"
+	f, err := Detect(context.Background(), &recordHost{stdout: func(string) string { return out }})
+	if err != nil || f.WANIface != "ens3" || f.WANIPv4 != "" || f.WANIPv6 != "2001:db8::10" {
+		t.Fatalf("facts %+v, err %v", f, err)
+	}
+	if !strings.Contains(detectScript, "ip -o -6 addr show dev \"$wan6\" scope global") {
+		t.Fatal("detect does not read the IPv6 address of the IPv6 uplink")
+	}
+}
+
 // Facts reach the wizard's forms, so the server's text loses its control
 // characters before it gets there.
 func TestDetectCleansFacts(t *testing.T) {

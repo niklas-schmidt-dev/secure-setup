@@ -41,6 +41,9 @@ table inet {{.TableName}} {
 
 		# DHCP replies: cloud providers assign the primary IPv4 address via DHCP
 		udp sport 67 udp dport 68 accept
+		# DHCPv6 replies: they come from the router's link-local address and answer
+		# a multicast, so they are not "established"; without them the lease runs out
+		ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept
 
 		# Tailscale: direct WireGuard connections (authenticated; relays are used otherwise)
 		udp dport {{.TailscaleUDPPort}} accept
