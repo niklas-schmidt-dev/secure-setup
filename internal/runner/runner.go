@@ -471,7 +471,7 @@ func (r *Runner) joinTailnet(ctx context.Context, log func(string)) (err error) 
 		r.joinedByLink = true
 		defer func() { err = r.leaveUnverifiedTailnet(host, err, log) }()
 	}
-	err = remote.TailscaleUp(ctx, host, remote.UpOptions{AuthKey: key, Hostname: p.Tailscale.Hostname}, log,
+	err = remote.TailscaleUp(ctx, host, remote.UpOptions{AuthKey: key, Hostname: p.Tailscale.Hostname, Tags: p.Tailscale.Tags, LoginServer: p.Tailscale.LoginServer}, log,
 		func(url string) {
 			r.attention("Open this link in your browser to add the server to your tailnet:\n" + url)
 		})

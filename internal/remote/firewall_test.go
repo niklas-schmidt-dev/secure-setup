@@ -551,6 +551,36 @@ func TestTailscaleUpLeavesSSHOff(t *testing.T) {
 	}
 }
 
+// Tags and a control server of one's own reach `tailscale up` as flags, and
+// the login link is then looked for on that server.
+func TestTailscaleUpTagsAndLoginServer(t *testing.T) {
+	h := &recordHost{stdout: func(string) string {
+		return "To authenticate, visit:\n\n\thttps://hs.example.com/register/abc123\n\thttps://login.tailscale.com/a/zzz\n"
+	}}
+	var url string
+	o := UpOptions{Hostname: "web-1", Tags: []string{"tag:server", "tag:web"}, LoginServer: "https://hs.example.com/"}
+	if err := TailscaleUp(context.Background(), h, o, func(string) {}, func(u string) { url = u }); err != nil {
+		t.Fatal(err)
+	}
+	s := h.all()
+	if !strings.Contains(s, "--advertise-tags='tag:server,tag:web'") || !strings.Contains(s, "--login-server='https://hs.example.com/'") {
+		t.Fatalf("tailscale up: %s", s)
+	}
+	if url != "https://hs.example.com/register/abc123" {
+		t.Fatalf("login link %q", url)
+	}
+	// Without them the command is what it was, and only Tailscale's own
+	// login server gives a login link.
+	h = &recordHost{stdout: func(string) string { return "https://evil.example/a/x https://login.tailscale.com/a/abc" }}
+	url = ""
+	if err := TailscaleUp(context.Background(), h, UpOptions{Hostname: "web-1"}, func(string) {}, func(u string) { url = u }); err != nil {
+		t.Fatal(err)
+	}
+	if s := h.all(); strings.Contains(s, "--advertise-tags") || strings.Contains(s, "--login-server") || url != "https://login.tailscale.com/a/abc" {
+		t.Fatalf("plain join: %s, link %q", s, url)
+	}
+}
+
 func TestTailnetName(t *testing.T) {
 	for _, c := range []struct {
 		json, want string

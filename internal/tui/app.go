@@ -403,6 +403,12 @@ func (m *model) summary() string {
 	if p.Tailscale.SSH {
 		line("", "Tailscale SSH enabled")
 	}
+	if !p.Tailscale.UseExisting && len(p.Tailscale.Tags) > 0 {
+		line("", "tags "+strings.Join(p.Tailscale.Tags, ", ")+" (from the plan)")
+	}
+	if !p.Tailscale.UseExisting && p.Tailscale.LoginServer != "" {
+		line("", "login server "+p.Tailscale.LoginServer+" (from the plan)")
+	}
 	line("SSH", "TCP "+plan.FormatPorts(p.Firewall.TailnetPorts)+" on "+p.Tailscale.AdminInterface+" only")
 	switch {
 	case p.Firewall.CloudflareTunnel:

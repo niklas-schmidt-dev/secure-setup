@@ -100,6 +100,11 @@ goes into the plan's `firewall` object:
 Forwarded traffic from it is then filtered like the internet. Each listed
 interface must exist on the server.
 
+## Tags and Headscale
+
+A plan can ask for ACL tags when the server joins, and can join a control
+server of your own instead of Tailscale's. See [the reference](reference.md#tags-and-a-control-server-of-your-own).
+
 ## Tailscale SSH
 
 Tailscale SSH is optional. It uses your tailnet identity instead of a local

@@ -168,6 +168,27 @@ func TestValidatePublicPorts(t *testing.T) {
 	}
 }
 
+func TestValidateTagsAndLoginServer(t *testing.T) {
+	ok := func(tags []string, server string) bool {
+		p := Default()
+		p.Server.Host, p.Tailscale.Tags, p.Tailscale.LoginServer = "203.0.113.10", tags, server
+		return p.Validate() == nil
+	}
+	if !ok([]string{"tag:server", "tag:web-1"}, "https://headscale.example.com") || !ok(nil, "http://10.0.0.2:8080") {
+		t.Fatal("valid tags or login server refused")
+	}
+	for _, tags := range [][]string{{"server"}, {"tag:"}, {"tag:a b"}, {"tag:x; reboot"}} {
+		if ok(tags, "") {
+			t.Errorf("tags %q accepted", tags)
+		}
+	}
+	for _, server := range []string{"headscale.example.com", "ftp://x", "https://x/ --ssh", "https://x'"} {
+		if ok(nil, server) {
+			t.Errorf("login server %q accepted", server)
+		}
+	}
+}
+
 func TestParsePorts(t *testing.T) {
 	got, err := ParsePorts("8080, 22;22 443")
 	if err != nil || FormatPorts(got) != "22, 443, 8080" {

@@ -310,6 +310,12 @@ func describe(p *plan.Plan) string {
 		fmt.Fprintf(&b, "  admin network   existing, %s on %s\n", p.Tailscale.AdminAddress, p.Tailscale.AdminInterface)
 	} else {
 		fmt.Fprintf(&b, "  tailscale       install and join (hostname %q)\n", p.Tailscale.Hostname)
+		if len(p.Tailscale.Tags) > 0 {
+			fmt.Fprintf(&b, "  tailscale tags  %s\n", strings.Join(p.Tailscale.Tags, ", "))
+		}
+		if p.Tailscale.LoginServer != "" {
+			fmt.Fprintf(&b, "  login server    %s\n", p.Tailscale.LoginServer)
+		}
 	}
 	fmt.Fprintf(&b, "  tailnet ports   TCP %s\n", plan.FormatPorts(p.Firewall.TailnetPorts))
 	if p.Firewall.CloudflareTunnel {

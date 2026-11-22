@@ -74,6 +74,12 @@ type Tailscale struct {
 	UDPPort        int    `json:"udp_port"`
 	UseExisting    bool   `json:"use_existing_network,omitempty"`
 	AdminAddress   string `json:"admin_address,omitempty"`
+	// Tags are the ACL tags the server asks for when it joins ("tag:server").
+	// The auth key, or whoever approves the login link, must own them.
+	Tags []string `json:"tags,omitempty"`
+	// LoginServer is the control server to join instead of Tailscale's, for
+	// a self-hosted one such as Headscale: "https://headscale.example.com".
+	LoginServer string `json:"login_server,omitempty"`
 }
 
 // Firewall is the inbound policy.
@@ -137,9 +143,11 @@ func Default() Plan {
 }
 
 var (
-	hostKeyRe = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
-	hostRe    = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
-	ifaceRe   = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
+	tagRe         = regexp.MustCompile(`^tag:[A-Za-z][A-Za-z0-9-]*$`)
+	loginServerRe = regexp.MustCompile(`^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$`)
+	hostKeyRe     = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
+	hostRe        = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+	ifaceRe       = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 )
 
 // Validate checks the plan for mistakes that would make the run fail or lock
@@ -177,6 +185,14 @@ func (p *Plan) Validate() error {
 		} else if a, err := netip.ParseAddr(p.Tailscale.AdminAddress); err != nil || a.Zone() != "" {
 			errs = append(errs, fmt.Errorf("admin address %q is not an IP address", p.Tailscale.AdminAddress))
 		}
+	}
+	for _, tag := range p.Tailscale.Tags {
+		if !tagRe.MatchString(tag) {
+			errs = append(errs, fmt.Errorf("tailscale tag %q must look like tag:server", tag))
+		}
+	}
+	if s := p.Tailscale.LoginServer; s != "" && !loginServerRe.MatchString(s) {
+		errs = append(errs, fmt.Errorf("login_server %q is not an http or https address such as https://headscale.example.com", s))
 	}
 	for _, n := range p.Firewall.ExtraWANInterfaces {
 		switch {

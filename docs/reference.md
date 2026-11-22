@@ -83,6 +83,20 @@ and the RHEL family it is dnf-automatic, which installs all updates. The
 server is not rebooted by them. Other package managers are left alone, and
 the result says so.
 
+### Tags and a control server of your own
+
+Inside the plan's `tailscale` object, `tags` lists the ACL tags the server
+asks for when it joins, and `login_server` names the control server to join
+in place of Tailscale's, such as a Headscale instance:
+
+```json
+"tailscale": { "tags": ["tag:server"], "login_server": "https://headscale.example.com" }
+```
+
+The auth key, or whoever completes the login link, must be allowed to use
+the tags. Both exist in the plan file only. They apply when the server
+joins; a server that is on the tailnet already keeps what it has.
+
 ### Ports open to everyone
 
 `firewall.public_tcp_ports` and `firewall.public_udp_ports` open ports to the
