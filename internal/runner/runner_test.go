@@ -525,6 +525,32 @@ func TestSettleEarlierRun(t *testing.T) {
 	}
 }
 
+// `secure-setup confirm` counts only in a session that arrived on the private
+// address over a connection opened after the rules went live. One that was
+// open before stays open under any rules (also when ssh shares it for a new
+// session, as ControlMaster does) and proves nothing.
+func TestCheckConfirm(t *testing.T) {
+	ap := netip.MustParseAddrPort
+	open := remote.ParseSessions("0 0 100.64.0.5:22 100.64.0.9:41000\n0 0 203.0.113.7:22 198.51.100.4:50000\n")
+	expect := formatConfirmExpect("100.64.0.5", open)
+	server := ap("100.64.0.5:22")
+	if err := CheckConfirm(expect, ap("100.64.0.9:41001"), server); err != nil {
+		t.Fatalf("a new connection was refused: %v", err)
+	}
+	if err := CheckConfirm(expect, ap("100.64.0.9:41000"), server); err == nil || !strings.Contains(err.Error(), "already open") {
+		t.Fatalf("a connection from before the apply confirmed: %v", err)
+	}
+	if err := CheckConfirm(expect, ap("198.51.100.4:50001"), ap("203.0.113.7:22")); err == nil || !strings.Contains(err.Error(), "came in over 203.0.113.7, not 100.64.0.5") {
+		t.Fatalf("a session over the public address confirmed: %v", err)
+	}
+	if err := CheckConfirm("", ap("100.64.0.9:41001"), server); err == nil || !strings.Contains(err.Error(), "nothing to confirm") {
+		t.Fatalf("confirmed without a waiting run: %v", err)
+	}
+	if !openBefore(open, ap("100.64.0.9:41000")) || openBefore(open, ap("100.64.0.9:41001")) {
+		t.Fatal("openBefore does not match by peer address and port")
+	}
+}
+
 func before(steps []string, a, b string) bool {
 	return slices.Index(steps, a) >= 0 && slices.Index(steps, a) < slices.Index(steps, b)
 }

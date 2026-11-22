@@ -135,7 +135,7 @@ d exec "$srv" test -f /var/lib/secure-setup/confirm-expect && fail "confirm-expe
 d exec "$srv" grep -q "Confirmed by.*login by root from $cliprv" /root/run1.log || fail "summary does not name the confirming login"
 echo "   summary names the confirming login"
 
-echo "== run 2: a session from BEFORE the apply must not count; \`secure-setup confirm\` in it must"
+echo "== run 2: a connection from BEFORE the apply must not count, not even with \`secure-setup confirm\`"
 # ControlMaster: one TCP connection opened before the apply, reused for the
 # confirm command, so no new session appears to the automatic detection.
 d exec -d "$cli" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i /root/.ssh/id_ed25519 -M -S /tmp/cm -N "root@$prvip"
@@ -143,19 +143,28 @@ for i in $(seq 1 10); do d exec "$cli" ssh -S /tmp/cm -O check "root@$prvip" >/d
 d exec "$cli" ssh -S /tmp/cm -O check "root@$prvip" >/dev/null 2>&1 || fail "control master did not come up"
 d exec -d "$srv" sh -c 'secure-setup here -f /root/plan-login.json --yes > /root/run2.log 2>&1; echo "EXIT=$?" >> /root/run2.log'
 wait_log /root/run2.log "Now prove the new rules" 90
-sleep 7
+sleep 5
 d exec "$srv" grep -q "EXIT=" /root/run2.log && { d exec "$srv" tail -20 /root/run2.log; fail "the old session was counted as a confirmation"; }
 d exec "$srv" test -f /var/lib/secure-setup/confirm-expect || fail "confirm-expect missing while waiting"
 echo "   old session correctly ignored"
 out=$(d exec "$srv" sh -c "SSH_CONNECTION='10.250.100.3 50001 $pubip 22' secure-setup confirm 2>&1 || true")
 echo "$out" | grep -q "came in over $pubip, not $prvip" || fail "confirm accepted a public-address session: $out"
 echo "   confirm refused a session over the public address"
-d exec "$cli" ssh -S /tmp/cm "root@$prvip" secure-setup confirm | grep -q "confirmed: this session arrived over $prvip" || fail "secure-setup confirm failed in the private session"
+# The shared connection stays open under any rules, so a new session on it
+# says nothing about them.
+out=$(d exec "$cli" ssh -S /tmp/cm "root@$prvip" secure-setup confirm 2>&1 || true)
+echo "$out" | grep -q "was already open when the new rules went live" || fail "confirm accepted a connection from before the apply: $out"
+d exec "$srv" grep -q "EXIT=" /root/run2.log && { d exec "$srv" tail -20 /root/run2.log; fail "confirm over the old connection confirmed the rules"; }
+echo "   confirm refused the connection that was open before the apply"
+# A session the server's TCP table does not show, as with Tailscale SSH, which
+# ends inside tailscaled: there the command is the only confirmation.
+out=$(d exec "$srv" sh -c "SSH_CONNECTION='$cliprv 50002 $prvip 22' secure-setup confirm 2>&1 || true")
+echo "$out" | grep -q "confirmed: this session arrived over $prvip from $cliprv" || fail "secure-setup confirm failed in a new session: $out"
 wait_log /root/run2.log "EXIT=" 60
 d exec "$cli" ssh -S /tmp/cm -O exit "root@$prvip" >/dev/null 2>&1 || true
 d exec "$srv" grep -q 'confirmed by `secure-setup confirm`' /root/run2.log || { d exec "$srv" tail -20 /root/run2.log; fail "explicit confirm not honoured"; }
 d exec "$srv" grep -q "EXIT=0" /root/run2.log || fail "run 2 should exit 0"
-echo "   explicit confirm accepted"
+echo "   explicit confirm in a new session accepted"
 
 echo "== run 3: self-check confirmation (unattended), no login at all"
 plan /root/plan-self.json self

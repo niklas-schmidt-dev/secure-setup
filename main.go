@@ -161,7 +161,8 @@ func runHereText(ctx context.Context, p *plan.Plan, host *localhost.Host, yes bo
 }
 
 // cmdConfirm runs in a fresh SSH session on the server while `here` waits
-// for a login. It checks that the session arrived over the private address.
+// for a login. It checks that the session arrived over the private address,
+// on a connection opened after the rules went live.
 func cmdConfirm(ctx context.Context) error {
 	host, err := localhost.New(ctx)
 	if err != nil {
@@ -171,23 +172,20 @@ func cmdConfirm(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if expect == "" {
-		return errors.New("nothing to confirm: no `secure-setup here` run is waiting on this machine")
-	}
 	client, server := localhost.SSHSession()
-	if !server.IsValid() {
+	if expect != "" && !server.IsValid() {
 		if os.Getenv("SUDO_USER") != "" {
 			return errors.New("sudo dropped SSH_CONNECTION; run it as: sudo --preserve-env=SSH_CONNECTION secure-setup confirm")
 		}
 		return errors.New("this is not an SSH session; run `secure-setup confirm` in a new SSH login over the tailnet")
 	}
-	if server.String() != expect {
-		return fmt.Errorf("this session came in over %s, not %s; log in over the tailnet address and run it there", server, expect)
+	if err := runner.CheckConfirm(expect, client, server); err != nil {
+		return err
 	}
 	if err := host.WriteFile(ctx, runner.ConfirmedPath, []byte(client.String()+"\n"), "0600"); err != nil {
 		return err
 	}
-	fmt.Printf("confirmed: this session arrived over %s from %s; the setup keeps the new rules\n", server, client)
+	fmt.Printf("confirmed: this session arrived over %s from %s; the setup keeps the new rules\n", server.Addr(), client.Addr())
 	return nil
 }
 
