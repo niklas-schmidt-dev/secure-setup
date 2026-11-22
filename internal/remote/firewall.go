@@ -71,6 +71,25 @@ func RollbackPending(ctx context.Context, c Host) (bool, error) {
 	return out == "pending", nil
 }
 
+// TrackTable is a table without any policy of its own. It exists between
+// staging and the apply, only to switch connection tracking on.
+const TrackTable = "secure_setup_track"
+
+// trackScript starts connection tracking before the new rules are loaded.
+// They accept established connections and drop the rest, and a connection
+// that tracking first sees in mid-stream counts as new until a packet has
+// gone each way. Where nothing tracked connections so far (no Tailscale, no
+// Docker, or only for the other address family), the next packet of an open
+// SSH session would be dropped when the rules go live. With tracking on from
+// here, the sessions that carry the run are established by then.
+var trackScript = fmt.Sprintf(`printf '%%s\n' 'table inet %[1]s' 'delete table inet %[1]s' 'table inet %[1]s {' 'chain input { type filter hook input priority 0; policy accept; ct state new counter; }' '}' > %[2]s/track.nft
+if nft -f %[2]s/track.nft 2>/dev/null; then
+	echo "connection tracking is on: sessions that are open now stay known when the rules change"
+else
+	echo "note: connection tracking could not be started early; a session that is idle may be cut when the rules go live"
+fi
+`, TrackTable, StateDir)
+
 // FirewallFiles is what PrepareFirewall installs.
 type FirewallFiles struct {
 	Ruleset        string // full nftables.conf
@@ -101,6 +120,7 @@ func PrepareFirewall(ctx context.Context, c Host, f *Facts, files FirewallFiles,
 echo "nftables.service loads $boot at boot"
 `
 	record += fmt.Sprintf("mkdir -p %s\nrm -f %s %s %s\n", StateDir, UFWWasActive, FirewalldWasActive, FirewalldWasEnabled)
+	record += trackScript
 	if f.UFWActive {
 		record += "touch " + UFWWasActive + "\n"
 		onLine("ufw is active: it stops when the new rules go live and comes back if they roll back")
@@ -175,14 +195,16 @@ echo "rollback timer armed: fires in %[3]ds unless confirmed"
 fi
 if [ -e %[7]s ]; then systemctl stop firewalld; echo "firewalld stopped (comes back if the rules roll back)"; fi
 if ! nft -f %[5]s; then
+	nft delete table inet %[10]s 2>/dev/null || true
 	systemctl stop %[1]s.timer >/dev/null 2>&1 || true
 	if [ -e %[6]s ]; then if [ -n "$ufw_init" ]; then "$ufw_init" start >/dev/null || true; else ufw --force enable >/dev/null || true; fi; fi
 	if [ -e %[7]s ]; then systemctl start firewalld || true; fi
 	echo "applying the ruleset failed; the previous firewall is back" >&2
 	exit 1
 fi
+nft delete table inet %[10]s 2>/dev/null || true
 echo "new firewall rules are live"
-`, RollbackUnit, RolledBackMarker, rollbackSeconds, RollbackScript, PendingPath, UFWWasActive, FirewalldWasActive, ufwInitScript, DecidedDir)
+`, RollbackUnit, RolledBackMarker, rollbackSeconds, RollbackScript, PendingPath, UFWWasActive, FirewalldWasActive, ufwInitScript, DecidedDir, TrackTable)
 	if err := c.Script(ctx, script, onLine); err != nil {
 		return fmt.Errorf("apply firewall: %w", err)
 	}

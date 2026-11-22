@@ -383,6 +383,7 @@ systemctl stop secure-setup-rollback.timer >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/secure-setup-cloudflare-sync.timer /etc/systemd/system/secure-setup-cloudflare-sync.service /usr/local/sbin/secure-setup-cloudflare-sync
 systemctl daemon-reload
 if nft list table inet secure_setup >/dev/null 2>&1; then nft delete table inet secure_setup; echo "firewall table removed: all inbound traffic is allowed again"; fi
+nft delete table inet ` + remote.TrackTable + ` 2>/dev/null || true
 if [ -f /etc/nftables.conf.secure-setup.bak ]; then
 	mv -f /etc/nftables.conf.secure-setup.bak /etc/nftables.conf
 	echo "restored the previous /etc/nftables.conf"

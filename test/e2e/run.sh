@@ -6,6 +6,7 @@
 # verification that the public port is closed, the automatic rollback, and
 # undo.
 # Usage: test/e2e/run.sh          (DOCKER_CONTEXT defaults to nas-docker)
+#        E2E_IPV6=1 test/e2e/run.sh    the same over the server's IPv6 addresses
 set -eu
 cd "$(dirname "$0")/../.."
 ctx=${DOCKER_CONTEXT:-nas-docker}
@@ -24,8 +25,18 @@ bin=${E2E_BINARY:-/tmp/secure-setup-linux-amd64}
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$bin" .
 
 echo "== start server and client"
-d network create --subnet "${E2E_SUBNET_PUBLIC:-10.250.100.0/24}" "$pub" >/dev/null
-d network create --subnet "${E2E_SUBNET_PRIVATE:-10.250.101.0/24}" "$prv" >/dev/null
+# With E2E_IPV6=1 both networks also carry IPv6, and the run reaches the
+# server at those addresses only: the path of a server without public IPv4.
+v6=${E2E_IPV6:-0}
+if [ "$v6" = 1 ]; then
+	d network create --ipv6 --subnet "${E2E_SUBNET_PUBLIC:-10.250.100.0/24}" --subnet "${E2E_SUBNET6_PUBLIC:-fd00:250:100::/64}" "$pub" >/dev/null
+	d network create --ipv6 --subnet "${E2E_SUBNET_PRIVATE:-10.250.101.0/24}" --subnet "${E2E_SUBNET6_PRIVATE:-fd00:250:101::/64}" "$prv" >/dev/null
+	addr=GlobalIPv6Address; daddr="ip6 daddr"
+else
+	d network create --subnet "${E2E_SUBNET_PUBLIC:-10.250.100.0/24}" "$pub" >/dev/null
+	d network create --subnet "${E2E_SUBNET_PRIVATE:-10.250.101.0/24}" "$prv" >/dev/null
+	addr=IPAddress; daddr="ip daddr"
+fi
 # Pinned names: a container restarted by its policy (the simulated reboot) can
 # otherwise get its two cards in the other order (Docker 28 or newer).
 ifname=com.docker.network.endpoint.ifname
@@ -37,8 +48,11 @@ d cp "$bin" "$cli:/usr/local/bin/secure-setup"
 d exec "$cli" sh -c 'mkdir -p /root/.ssh && chmod 700 /root/.ssh && ssh-keygen -q -t ed25519 -N "" -f /root/.ssh/id_ed25519'
 pubkey=$(d exec "$cli" cat /root/.ssh/id_ed25519.pub)
 d exec "$srv" sh -c "mkdir -p /root/.ssh && printf '%s\n' '$pubkey' > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys"
-pubip=$(d inspect -f "{{(index .NetworkSettings.Networks \"$pub\").IPAddress}}" "$srv")
-prvip=$(d inspect -f "{{(index .NetworkSettings.Networks \"$prv\").IPAddress}}" "$srv")
+pubip=$(d inspect -f "{{(index .NetworkSettings.Networks \"$pub\").$addr}}" "$srv")
+prvip=$(d inspect -f "{{(index .NetworkSettings.Networks \"$prv\").$addr}}" "$srv")
+[ -n "$pubip" ] && [ -n "$prvip" ] || fail "the server has no address on both networks"
+# How the tool prints address and port: brackets around an IPv6 address.
+if [ "$v6" = 1 ]; then pubhp="[$pubip]:22"; else pubhp="$pubip:22"; fi
 echo "   server public $pubip (eth0), private $prvip (eth1)"
 for i in $(seq 1 30); do
 	if d exec "$srv" systemctl is-active --quiet ssh 2>/dev/null; then break; fi
@@ -71,7 +85,7 @@ d exec "$srv" test -e /var/lib/secure-setup && fail "the server was touched alth
 echo "   a wrong --host-key stops the run before the server is touched"
 d exec "$cli" secure-setup apply -f /root/plan.json --host "$pubip" --host-key "$fp" --yes 2>&1 | tee /tmp/e2e-run1.log
 grep -q "The server is locked down" /tmp/e2e-run1.log || fail "run 1 did not report success"
-grep -q "applying /root/plan.json to $pubip:22" /tmp/e2e-run1.log || fail "--host did not replace the plan's address"
+grep -qF "applying /root/plan.json to $pubhp" /tmp/e2e-run1.log || fail "--host did not replace the plan's address"
 grep -q "==> Update the system" /tmp/e2e-run1.log && ! grep -q "Update the system: skipped" /tmp/e2e-run1.log || fail "run 1 did not update the system first"
 grep -q "the server rebooted and is reachable over the private network again" /tmp/e2e-run1.log || fail "run 1 did not reboot"
 grep -q "after the reboot: rules loaded, nftables enabled at boot" /tmp/e2e-run1.log || fail "run 1 did not check the server after the reboot"
@@ -81,7 +95,7 @@ echo "== assertions after run 1"
 if d exec "$cli" nc -z -w 5 "$pubip" 22; then fail "public ssh still open"; else echo "   public ssh blocked"; fi
 d exec "$cli" nc -z -w 5 "$prvip" 22 && echo "   private ssh open"
 d exec "$cli" nc -z -w 5 "$prvip" 8080 2>/dev/null && fail "nothing listens on 8080, nc should not connect" || true
-d exec "$srv" nft list chain inet secure_setup input | grep -Eq "iifname \"eth1\" ip daddr $prvip tcp dport \\{ 22, 8080 \\} counter packets [0-9]+ bytes [0-9]+ accept" || fail "admin rule not bound to $prvip on eth1"
+d exec "$srv" nft list chain inet secure_setup input | grep -Eq "iifname \"eth1\" $daddr $prvip tcp dport \\{ 22, 8080 \\} counter packets [0-9]+ bytes [0-9]+ accept" || fail "admin rule not bound to $prvip on eth1"
 echo "   tailnet rule present, bound to $prvip"
 d exec "$srv" nft list set inet secure_setup cloudflare_v4 | grep -q '173.245.48.0/20' && echo "   cloudflare set populated"
 d exec "$srv" sh -c 'systemctl is-enabled nftables' | grep -q enabled && echo "   nftables.service enabled"
@@ -140,7 +154,7 @@ grep -q "rolled back" /tmp/e2e-run2.log || fail "run 2 did not report the rollba
 [ "$took" -lt 60 ] || fail "run 2 took ${took}s: it did not end once the server had rolled back"
 echo "   ended after ${took}s, once the server had rolled back"
 d exec "$cli" nc -z -w 5 "$prvip" 22 && echo "   private ssh open again after rollback"
-d exec "$srv" nft list chain inet secure_setup input | grep -Eq "iifname \"eth1\" ip daddr $prvip tcp dport \\{ 22, 8080 \\} counter packets [0-9]+ bytes [0-9]+ accept" || fail "run 1 rules not restored"
+d exec "$srv" nft list chain inet secure_setup input | grep -Eq "iifname \"eth1\" $daddr $prvip tcp dport \\{ 22, 8080 \\} counter packets [0-9]+ bytes [0-9]+ accept" || fail "run 1 rules not restored"
 echo "   previous (run 1) rules restored"
 if d exec "$cli" nc -z -w 5 "$pubip" 22; then fail "public ssh open after rollback"; else echo "   public ssh still blocked"; fi
 d exec "$srv" test -f /var/lib/secure-setup/rolled-back && echo "   rollback marker written"

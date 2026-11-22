@@ -923,6 +923,13 @@ func (r *Runner) stageFirewallOn(ctx context.Context, host remote.Host, log func
 }
 
 func (r *Runner) applyFirewall(ctx context.Context, log func(string)) error {
+	// The first connection carries the last steps of the run (Tailscale SSH,
+	// the reboot) and was idle since the private one took over. A packet
+	// each way now makes it an established connection for the tracking that
+	// staging switched on, before the rules drop what tracking does not know.
+	if _, err := r.pub.Output(ctx, "true"); err != nil {
+		log("note: the first connection of this run does not answer any more: " + shortErr(err))
+	}
 	return r.applyFirewallOn(ctx, r.admin, log)
 }
 

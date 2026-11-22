@@ -68,6 +68,29 @@ func TestPrepareDoesNotRetireHostFirewall(t *testing.T) {
 	}
 }
 
+// Staging switches connection tracking on, so the sessions that are open are
+// established connections by the time the rules drop everything else; the
+// table that did it goes once the rules are loaded, also when loading fails.
+func TestTrackingStartsBeforeTheRulesLoad(t *testing.T) {
+	h := &recordHost{}
+	if err := PrepareFirewall(context.Background(), h, &Facts{PkgMgr: "apt-get", NFT: true}, FirewallFiles{Ruleset: "x", Elements: "y"}, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	stage := h.all()
+	if !strings.Contains(stage, "table inet "+TrackTable+" {") || !strings.Contains(stage, "policy accept; ct state new counter;") || strings.Contains(stage, "nft -f "+PendingPath) {
+		t.Fatalf("staging must start tracking and load no rules:\n%s", stage)
+	}
+	h = &recordHost{}
+	if err := ApplyFirewall(context.Background(), h, 60, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	s := h.all()
+	load, live := strings.Index(s, "if ! nft -f "+PendingPath), strings.Index(s, `echo "new firewall rules are live"`)
+	if n := strings.Count(s, "nft delete table inet "+TrackTable); n != 2 || !strings.Contains(s[load:live], "nft delete table inet "+TrackTable) {
+		t.Fatalf("the tracking table must go after the load, on both outcomes (%d deletes):\n%s", n, s)
+	}
+}
+
 // Apply stops the host firewall only after the timer is armed, and brings it
 // back when the new rules fail to load; the rollback brings it back too.
 func TestApplyAndRollbackRestoreHostFirewall(t *testing.T) {
