@@ -296,7 +296,7 @@ the archive for your platform.
 
 To build and install from source, use the Go version required by
 [go.mod](https://github.com/niklas-schmidt-dev/secure-setup/blob/main/go.mod)
-(currently Go 1.27.3 or newer):
+(currently Go 1.27.4 or newer):
 
 ```sh
 go install github.com/niklas-schmidt-dev/secure-setup@latest
