@@ -4,6 +4,7 @@
 package plan
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -244,7 +245,11 @@ func Load(path string) (Plan, error) {
 		return Plan{}, err
 	}
 	p := Default()
-	if err := json.Unmarshal(data, &p); err != nil {
+	// A misspelt field would otherwise leave its default in force without a
+	// word: "web_port": [] keeps HTTPS open.
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
 		return Plan{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if err := p.Validate(); err != nil {

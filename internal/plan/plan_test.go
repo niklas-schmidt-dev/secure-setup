@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -82,6 +83,27 @@ func TestSaveLoadDropsSecrets(t *testing.T) {
 	}
 	if got.Server.Host != "vps.example.com" || got.Firewall.RollbackSeconds != 120 {
 		t.Errorf("round trip lost data: %+v", got)
+	}
+}
+
+// A misspelt field must stop the plan instead of leaving the default in
+// force: "web_port": [] would keep HTTPS open from Cloudflare.
+func TestLoadRejectsUnknownFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "p.json")
+	write := func(s string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"server":{"host":"203.0.113.10"},"firewall":{"web_ports":[]}}`)
+	p, err := Load(path)
+	if err != nil || len(p.Firewall.WebPorts) != 0 {
+		t.Fatalf("web_ports: [] did not close the web ports: %v, %v", p.Firewall.WebPorts, err)
+	}
+	write(`{"server":{"host":"203.0.113.10"},"firewall":{"web_port":[]}}`)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), `"web_port"`) {
+		t.Fatalf("the misspelt field was accepted: %v", err)
 	}
 }
 
