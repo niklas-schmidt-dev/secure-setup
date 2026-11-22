@@ -22,6 +22,7 @@ import (
 	"github.com/niklas-schmidt-dev/secure-setup/internal/remote"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/runner"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/sshx"
+	"github.com/niklas-schmidt-dev/secure-setup/internal/textui"
 )
 
 type phase int
@@ -151,6 +152,7 @@ type model struct {
 	result     *runner.Result
 	runErr     error
 	savedPath  string
+	transcript *textui.Transcript // the log file of the run
 }
 
 func newModel(ctx context.Context, cancel context.CancelFunc, p *plan.Plan, version string) *model {
@@ -790,12 +792,19 @@ func checkFacts(f *remote.Facts) error {
 }
 
 func (m *model) startRun() tea.Cmd {
-	r := runner.New(runner.Options{
-		Plan:   m.plan,
-		Report: func(e runner.Event) { m.send(runEventMsg(e)) },
-		Prompt: prompter{send: m.send},
-		Local:  m.local,
-	})
+	name := m.plan.Server.Host
+	if m.local != nil {
+		name = "this-machine"
+	}
+	opts := runner.Options{Plan: m.plan, Prompt: prompter{send: m.send}, Local: m.local}
+	// The run screen goes away with the wizard; the log file stays.
+	log := textui.OpenTranscript(name, runner.New(opts).Steps())
+	m.transcript = log
+	opts.Report = func(e runner.Event) {
+		log.Event(e)
+		m.send(runEventMsg(e))
+	}
+	r := runner.New(opts)
 	m.steps = r.Steps()
 	m.states = make([]stepState, len(m.steps))
 	m.skipReason = make([]string, len(m.steps))
@@ -804,6 +813,10 @@ func (m *model) startRun() tea.Cmd {
 	ctx := m.ctx
 	return func() tea.Msg {
 		res, err := r.Run(ctx)
+		if err == nil {
+			log.Note(Summary(m.plan, res))
+		}
+		log.Close()
 		return runDoneMsg{result: res, err: err}
 	}
 }
@@ -965,6 +978,9 @@ func (m *model) doneView() string {
 			b.WriteString(okStyle.Render("✓ The server is locked down.") + "\n\n")
 		}
 		b.WriteString(Summary(m.plan, m.result))
+	}
+	if m.transcript != nil && m.transcript.Path != "" {
+		b.WriteString("\nLog of this run:  " + shortenHome(m.transcript.Path) + "\n")
 	}
 	b.WriteString("\n" + mutedStyle.Render("press q to exit"))
 	return b.String()

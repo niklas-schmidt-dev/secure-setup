@@ -164,15 +164,41 @@ func runHereText(ctx context.Context, p *plan.Plan, host *localhost.Host, yes bo
 		fmt.Print(describe(p))
 	}
 	opts := runner.Options{Plan: p, Prompt: prompt, Local: host, Unattended: yes}
-	opts.Report = textui.Reporter(os.Stdout, runner.New(opts).Steps())
+	log := reportWithLog(&opts, "this-machine")
+	defer log.Close()
 	res, err := runner.New(opts).Run(ctx)
+	return finish(log, "This machine is locked down.", p, res, err)
+}
+
+// reportWithLog makes a run print its events and write them to its log file.
+func reportWithLog(opts *runner.Options, name string) *textui.Transcript {
+	steps := runner.New(*opts).Steps()
+	log := textui.OpenTranscript(name, steps)
+	print := textui.Reporter(os.Stdout, steps)
+	opts.Report = func(e runner.Event) {
+		print(e)
+		log.Event(e)
+	}
+	return log
+}
+
+// finish prints how a run ended and where its log is.
+func finish(log *textui.Transcript, done string, p *plan.Plan, res *runner.Result, err error) error {
 	if err != nil {
+		if log.Path != "" {
+			fmt.Fprintln(os.Stderr, "log of this run:", log.Path)
+		}
 		return err
 	}
+	summary := tui.Summary(p, res)
+	log.Note(done + "\n" + summary)
 	fmt.Println()
-	fmt.Println("This machine is locked down.")
+	fmt.Println(done)
 	fmt.Println()
-	fmt.Print(tui.Summary(p, res))
+	fmt.Print(summary)
+	if log.Path != "" {
+		fmt.Printf("%-24s %s\n", "Log of this run", log.Path)
+	}
 	return nil
 }
 
@@ -264,17 +290,10 @@ func cmdApply(ctx context.Context, args []string) error {
 		}
 	}
 	opts := runner.Options{Plan: &p, Prompt: prompt, Unattended: *yes}
-	opts.Report = textui.Reporter(os.Stdout, runner.New(opts).Steps())
-	r := runner.New(opts)
-	res, err := r.Run(ctx)
-	if err != nil {
-		return err
-	}
-	fmt.Println()
-	fmt.Println("The server is locked down.")
-	fmt.Println()
-	fmt.Print(tui.Summary(&p, res))
-	return nil
+	log := reportWithLog(&opts, p.Server.Host)
+	defer log.Close()
+	res, err := runner.New(opts).Run(ctx)
+	return finish(log, "The server is locked down.", &p, res, err)
 }
 
 func describe(p *plan.Plan) string {

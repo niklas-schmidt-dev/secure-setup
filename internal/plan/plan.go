@@ -298,13 +298,17 @@ const LocalSavePath = "/etc/secure-setup/plan.json"
 
 // DefaultSavePath is where the wizard stores the plan for replay.
 func DefaultSavePath(host string) string {
-	safe := strings.Map(func(r rune) rune {
+	return filepath.Join(ConfigDir(), SafeName(host)+".json")
+}
+
+// SafeName turns a server address into a file name.
+func SafeName(host string) string {
+	return strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-' {
 			return r
 		}
 		return '_'
 	}, host)
-	return filepath.Join(ConfigDir(), safe+".json")
 }
 
 // ConfigDir is ~/.config/secure-setup.
