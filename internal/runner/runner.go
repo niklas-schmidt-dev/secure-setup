@@ -890,10 +890,12 @@ func (r *Runner) extraWAN(log func(string)) []string {
 
 func (r *Runner) stageFirewallOn(ctx context.Context, host remote.Host, log func(string)) error {
 	p := r.o.Plan
-	// The plan can only know the port a remote run connects to; sshd's own
-	// port is known here.
-	if slices.Contains(p.Firewall.PublicTCPPorts, r.facts.SSHPort) {
-		return fmt.Errorf("public_tcp_ports contains %d, the port sshd listens on: that would open SSH to the internet again", r.facts.SSHPort)
+	// The plan can only know the port a remote run connects to; the ports
+	// sshd listens on are known here.
+	for _, port := range append([]int{r.facts.SSHPort}, r.facts.SSHPorts...) {
+		if slices.Contains(p.Firewall.PublicTCPPorts, port) {
+			return fmt.Errorf("public_tcp_ports contains %d, a port sshd listens on: that would open SSH to the internet again", port)
+		}
 	}
 	if public := plan.PublicPorts(p.Firewall); public != "" {
 		log("open to the whole internet, as the plan asks: " + public)

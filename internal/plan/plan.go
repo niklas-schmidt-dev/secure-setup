@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -210,10 +211,13 @@ func (p *Plan) Validate() error {
 			errs = append(errs, fmt.Errorf("port %d is out of range", port))
 		}
 	}
-	for _, port := range p.Firewall.PublicTCPPorts {
+	// UDP too: a web port open to everyone over UDP serves HTTP/3 past Cloudflare.
+	for _, port := range slices.Concat(p.Firewall.PublicTCPPorts, p.Firewall.PublicUDPPorts) {
 		if slices.Contains(p.Firewall.WebPorts, port) {
-			errs = append(errs, fmt.Errorf("port %d is in web_ports and in public_tcp_ports: it would be open to everyone, not only to Cloudflare", port))
+			errs = append(errs, fmt.Errorf("port %d is a web port and a public port: it would be open to everyone, not only to Cloudflare", port))
 		}
+	}
+	for _, port := range p.Firewall.PublicTCPPorts {
 		if !p.Local && port == p.Server.Port {
 			errs = append(errs, fmt.Errorf("public_tcp_ports contains the SSH port %d: that would open SSH to the internet again", port))
 		}
@@ -306,6 +310,9 @@ func Read(path string) (Plan, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&p); err != nil {
 		return Plan{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return Plan{}, fmt.Errorf("parse %s: text after the plan's closing brace", path)
 	}
 	return p, nil
 }

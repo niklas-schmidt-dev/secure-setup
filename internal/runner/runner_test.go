@@ -539,17 +539,25 @@ func TestCheckConfirm(t *testing.T) {
 	open := remote.ParseSessions("0 0 100.64.0.5:22 100.64.0.9:41000\n0 0 203.0.113.7:22 198.51.100.4:50000\n")
 	expect := formatConfirmExpect("100.64.0.5", open)
 	server := ap("100.64.0.5:22")
-	if err := CheckConfirm(expect, ap("100.64.0.9:41001"), server); err != nil {
+	self := []netip.Addr{netip.MustParseAddr("203.0.113.7"), netip.MustParseAddr("100.64.0.5")}
+	if err := CheckConfirm(expect, ap("100.64.0.9:41001"), server, self); err != nil {
 		t.Fatalf("a new connection was refused: %v", err)
 	}
-	if err := CheckConfirm(expect, ap("100.64.0.9:41000"), server); err == nil || !strings.Contains(err.Error(), "already open") {
+	if err := CheckConfirm(expect, ap("100.64.0.9:41000"), server, self); err == nil || !strings.Contains(err.Error(), "already open") {
 		t.Fatalf("a connection from before the apply confirmed: %v", err)
 	}
-	if err := CheckConfirm(expect, ap("198.51.100.4:50001"), ap("203.0.113.7:22")); err == nil || !strings.Contains(err.Error(), "came in over 203.0.113.7, not 100.64.0.5") {
+	if err := CheckConfirm(expect, ap("198.51.100.4:50001"), ap("203.0.113.7:22"), self); err == nil || !strings.Contains(err.Error(), "came in over 203.0.113.7, not 100.64.0.5") {
 		t.Fatalf("a session over the public address confirmed: %v", err)
 	}
-	if err := CheckConfirm("", ap("100.64.0.9:41001"), server); err == nil || !strings.Contains(err.Error(), "nothing to confirm") {
+	if err := CheckConfirm("", ap("100.64.0.9:41001"), server, self); err == nil || !strings.Contains(err.Error(), "nothing to confirm") {
 		t.Fatalf("confirmed without a waiting run: %v", err)
+	}
+	// A login from this machine to its own private address goes over lo and
+	// never meets the rules.
+	for _, local := range []string{"100.64.0.5:50000", "203.0.113.7:50000", "127.0.0.1:50000"} {
+		if err := CheckConfirm(expect, ap(local), server, self); err == nil || !strings.Contains(err.Error(), "this machine itself") {
+			t.Fatalf("a session from this machine (%s) confirmed: %v", local, err)
+		}
 	}
 	if !openBefore(open, ap("100.64.0.9:41000")) || openBefore(open, ap("100.64.0.9:41001")) {
 		t.Fatal("openBefore does not match by peer address and port")
@@ -569,7 +577,12 @@ func TestPublicPortsNeverOpenSSH(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "open SSH to the internet again") || len(scripts) != 0 {
 		t.Fatalf("err %v, scripts %q", err, scripts)
 	}
-	r.facts.SSHPort = 22
+	// sshd may listen on more than one port; none of them is opened.
+	r.facts.SSHPort, r.facts.SSHPorts = 22, []int{22, 2222}
+	if err := r.stageFirewallOn(context.Background(), scriptHost{scripts: &scripts}, func(string) {}); err == nil || len(scripts) != 0 {
+		t.Fatalf("a second sshd port was opened to everyone: %v", err)
+	}
+	r.facts.SSHPorts = []int{22}
 	p.Firewall.TailnetPorts = []int{22}
 	if err := r.stageFirewallOn(context.Background(), scriptHost{scripts: &scripts}, func(string) {}); err != nil || len(scripts) == 0 {
 		t.Fatalf("a public port that is not sshd's: %v", err)

@@ -36,6 +36,11 @@ func formatConfirmExpect(admin string, before []remote.Session) string {
 	return b.String()
 }
 
+// localPeer reports whether a connection from peer started on this machine.
+func localPeer(peer, admin netip.Addr, self []netip.Addr) bool {
+	return peer.IsLoopback() || peer == admin || slices.Contains(self, peer)
+}
+
 func openBefore(before []remote.Session, peer netip.AddrPort) bool {
 	return slices.ContainsFunc(before, func(s remote.Session) bool { return s.Peer == peer })
 }
@@ -43,15 +48,20 @@ func openBefore(before []remote.Session, peer netip.AddrPort) bool {
 // CheckConfirm decides whether the SSH session `secure-setup confirm` runs in
 // shows that the new rules let its user in. expect is the content of
 // ConfirmExpectPath. The session must have arrived on the private address,
-// over a connection that was not open yet when the rules went live: an
-// older one stays open under any rules and proves nothing.
-func CheckConfirm(expect string, client, server netip.AddrPort) error {
+// from another machine (self lists this one's addresses; a login from here
+// reaches the private address over lo, past the rules), over a connection
+// that was not open yet when the rules went live: an older one stays open
+// under any rules and proves nothing.
+func CheckConfirm(expect string, client, server netip.AddrPort, self []netip.Addr) error {
 	lines := strings.Fields(expect)
 	if len(lines) == 0 {
 		return errors.New("nothing to confirm: no `secure-setup here` run is waiting on this machine")
 	}
 	if server.Addr().String() != lines[0] {
 		return fmt.Errorf("this session came in over %s, not %s; log in over the tailnet address and run it there", server.Addr(), lines[0])
+	}
+	if localPeer(client.Addr(), server.Addr(), self) {
+		return fmt.Errorf("this session comes from this machine itself (%s), so it did not pass the new rules; log in from another device on the tailnet and run it there", client.Addr())
 	}
 	if slices.Contains(lines[1:], client.String()) {
 		return fmt.Errorf("this connection (from %s) was already open when the new rules went live, so it does not show that they let you in. Open a new SSH connection to %s and run `secure-setup confirm` there (with shared connections: ssh -o ControlPath=none)", client, lines[0])
@@ -392,9 +402,9 @@ func (r *Runner) confirmByLogin(ctx context.Context, log func(string)) error {
 			// `secure-setup confirm` refuses a connection from before the
 			// apply itself; a marker that got here anyway does not count.
 			peer, err := netip.ParseAddrPort(by)
-			if err != nil || openBefore(r.before, peer) {
+			if err != nil || openBefore(r.before, peer) || localPeer(peer.Addr(), adminAddr, self) {
 				_, _ = r.local.Output(ctx, "rm -f "+ConfirmedPath)
-				log("ignored a `secure-setup confirm` from " + by + ": that connection was open before the rules went live")
+				log("ignored a `secure-setup confirm` from " + by + ": that connection was open before the rules went live, or comes from this machine")
 			} else {
 				r.result.ConfirmedBy = "`secure-setup confirm` from " + peer.Addr().String()
 				log("confirmed by `secure-setup confirm` in a session from " + peer.Addr().String())

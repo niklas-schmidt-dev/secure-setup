@@ -10,10 +10,11 @@ const (
 	// after the distribution's own 20auto-upgrades, so its values win; undo
 	// removes it.
 	AutoUpdatesAPT = "/etc/apt/apt.conf.d/52secure-setup-auto-upgrades"
-	// AutoUpdatesDNF5 turns on installing for dnf5's automatic plugin, which
-	// has one timer and decides by its configuration. Written only when the
-	// file does not exist.
-	AutoUpdatesDNF5 = "/etc/dnf/dnf5-plugins/automatic.conf"
+	// AutoUpdatesDNF5 makes dnf 5's automatic service install what it
+	// downloads. dnf 5 has one timer, and its service installs only when
+	// told to; the flag on the command line wins over every configuration
+	// file. undo removes the file.
+	AutoUpdatesDNF5 = "/etc/systemd/system/dnf5-automatic.service.d/secure-setup.conf"
 	// AutoUpdatesTimer names the dnf timer this tool enabled, so undo
 	// disables that one and no timer that was already on.
 	AutoUpdatesTimer = StateDir + "/auto-updates-timer"
@@ -25,22 +26,25 @@ APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 `
 
-// dnf 4 ships a timer that installs whatever its configuration says
-// (dnf-automatic-install.timer). dnf 5 has one timer, which installs only
-// with apply_updates = yes.
-const autoUpdatesDNFScript = `conf=` + AutoUpdatesDNF5 + `
+// dnf 4 ships a timer whose service installs (dnf-automatic-install.timer).
+// dnf 5 has one timer; its service gets --installupdates through a drop-in.
+const autoUpdatesDNFScript = `dropin=` + AutoUpdatesDNF5 + `
 if systemctl cat dnf-automatic-install.timer >/dev/null 2>&1; then
 	timer=dnf-automatic-install.timer
 elif systemctl cat dnf5-automatic.timer >/dev/null 2>&1; then
 	timer=dnf5-automatic.timer
-	if [ ! -e "$conf" ]; then
-		mkdir -p "$(dirname "$conf")"
-		printf '%s\n' '# Managed by secure-setup: install updates automatically.' '[commands]' 'apply_updates = yes' > "$conf"
-		echo "wrote $conf"
-	elif ! grep -Eq '^[[:space:]]*apply_updates[[:space:]]*=[[:space:]]*(yes|true|1)' "$conf"; then
-		echo "$conf exists and does not set apply_updates = yes; set it there to have updates installed" >&2
-		exit 1
-	fi
+	run=$(systemctl cat dnf5-automatic.service 2>/dev/null | sed -n 's/^ExecStart=//p' | tail -n 1)
+	[ -n "$run" ] || { echo "dnf5-automatic.service has no command to extend" >&2; exit 1; }
+	case " $run " in
+	*" --installupdates "*) ;;
+	*)
+		mkdir -p "$(dirname "$dropin")"
+		printf '%s\n' '# Managed by secure-setup: install the updates, not only download them.' '[Service]' 'ExecStart=' "ExecStart=$run --installupdates" > "$dropin"
+		systemctl daemon-reload
+		echo "wrote $dropin"
+		;;
+	esac
+	systemctl cat dnf5-automatic.service 2>/dev/null | sed -n 's/^ExecStart=//p' | tail -n 1 | grep -q -- '--installupdates' || { echo "dnf5-automatic.service still runs without --installupdates" >&2; exit 1; }
 else
 	echo "dnf-automatic has no timer on this system" >&2
 	exit 1
@@ -95,19 +99,25 @@ echo "security updates install by themselves every day (unattended-upgrades)"
 
 // AutoUpdatesOnTest is a shell test that succeeds when the automatic updates
 // EnableAutoUpdates sets up are on.
-const AutoUpdatesOnTest = `{ { [ -f ` + AutoUpdatesAPT + ` ] && command -v unattended-upgrade >/dev/null 2>&1; } || systemctl is-enabled --quiet dnf-automatic-install.timer 2>/dev/null || systemctl is-enabled --quiet dnf5-automatic.timer 2>/dev/null; }`
+const AutoUpdatesOnTest = `{ { [ -f ` + AutoUpdatesAPT + ` ] && command -v unattended-upgrade >/dev/null 2>&1; } || systemctl is-enabled --quiet dnf-automatic-install.timer 2>/dev/null || { systemctl is-enabled --quiet dnf5-automatic.timer 2>/dev/null && systemctl cat dnf5-automatic.service 2>/dev/null | sed -n 's/^ExecStart=//p' | tail -n 1 | grep -q -- '--installupdates'; }; }`
 
-// UndoAutoUpdatesScript switches off what EnableAutoUpdates switched on. The
-// packages stay installed.
+// UndoAutoUpdatesScript switches off what EnableAutoUpdates switched on: its
+// own files always, a dnf timer only when this tool enabled it. The packages
+// stay installed.
 const UndoAutoUpdatesScript = `if [ -f ` + AutoUpdatesAPT + ` ]; then
 	rm -f ` + AutoUpdatesAPT + `
 	echo "automatic security updates switched off (unattended-upgrades stays installed)"
+fi
+if [ -f ` + AutoUpdatesDNF5 + ` ]; then
+	rm -f ` + AutoUpdatesDNF5 + `
+	rmdir "$(dirname ` + AutoUpdatesDNF5 + `)" 2>/dev/null || true
+	systemctl daemon-reload
+	echo "dnf5-automatic.service no longer installs updates by itself"
 fi
 if [ -s ` + AutoUpdatesTimer + ` ]; then
 	timer=$(cat ` + AutoUpdatesTimer + `)
 	case $timer in dnf-automatic-install.timer | dnf5-automatic.timer)
 		systemctl disable --now "$timer" >/dev/null 2>&1 || true
-		if grep -q 'Managed by secure-setup' ` + AutoUpdatesDNF5 + ` 2>/dev/null; then rm -f ` + AutoUpdatesDNF5 + `; fi
 		echo "automatic updates switched off ($timer; dnf-automatic stays installed)" ;;
 	esac
 fi

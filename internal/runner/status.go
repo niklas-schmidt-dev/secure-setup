@@ -3,6 +3,8 @@ package runner
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/niklas-schmidt-dev/secure-setup/internal/remote"
@@ -115,8 +117,11 @@ func ReadStatus(ctx context.Context, host remote.Host) (*Status, error) {
 		if s.InputPolicy != "drop" {
 			st.Problems = append(st.Problems, "the input chain does not drop by default (policy "+orUnknown(s.InputPolicy)+")")
 		}
-		if s.AdminInterface == "" {
+		switch {
+		case s.AdminInterface == "":
 			st.Problems = append(st.Problems, "the loaded rules have no rule for the private network")
+		case s.AdminPorts != "all" && !slices.Contains(strings.Split(s.AdminPorts, ", "), strconv.Itoa(s.SSHPort)):
+			st.Problems = append(st.Problems, fmt.Sprintf("the rule for the private network does not let sshd's port %d in (it has TCP %s)", s.SSHPort, s.AdminPorts))
 		}
 		if !s.Persisted && !s.RollbackPending {
 			st.Problems = append(st.Problems, "/etc/nftables.conf is not the secure-setup ruleset, so the rules would not survive a reboot")

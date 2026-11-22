@@ -156,7 +156,7 @@ func (p Params) normalized() (Params, error) {
 	if p.PublicUDPPorts, err = cleanPorts(p.PublicUDPPorts); err != nil {
 		return p, fmt.Errorf("nftgen: public UDP ports: %w", err)
 	}
-	for _, port := range p.PublicTCPPorts {
+	for _, port := range slices.Concat(p.PublicTCPPorts, p.PublicUDPPorts) {
 		if slices.Contains(p.WebPorts, port) {
 			return p, fmt.Errorf("nftgen: port %d is a web port and a public port", port)
 		}

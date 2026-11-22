@@ -120,6 +120,7 @@ type model struct {
 	tsSSH       bool
 	webChoice   string
 	customWeb   []int // web ports of a loaded plan that the wizard has no choice for
+	noSync      bool  // the loaded plan has web ports without the daily Cloudflare refresh
 	tunnelToken string
 	extraPorts  string
 	allowPing   bool
@@ -182,6 +183,7 @@ func (m *model) bind() {
 	m.tsHostname = p.Tailscale.Hostname
 	m.tsSSH = p.Tailscale.SSH
 	m.webChoice = webChoiceFor(p.Firewall)
+	m.noSync = len(p.Firewall.WebPorts) > 0 && !p.Firewall.CloudflareSync
 	m.customWeb = nil
 	if m.webChoice == "custom" {
 		m.customWeb = slices.Clone(p.Firewall.WebPorts)
@@ -415,7 +417,7 @@ func (m *model) summary() string {
 		line("Web", "through a Cloudflare Tunnel; no web port opened")
 	case len(p.Firewall.WebPorts) > 0:
 		line("Web", "TCP "+plan.FormatPorts(p.Firewall.WebPorts)+" on "+p.Firewall.WANInterface+", Cloudflare only")
-		line("", "ranges refreshed daily")
+		line("", map[bool]string{true: "ranges refreshed daily", false: "ranges not refreshed (from the plan)"}[p.Firewall.CloudflareSync])
 	default:
 		line("Web", "none")
 	}
@@ -693,7 +695,7 @@ func (m *model) advance() (tea.Model, tea.Cmd) {
 		if p.Firewall.CloudflareTunnel && m.tunnelToken != "" {
 			p.Firewall.TunnelToken = m.tunnelToken
 		}
-		p.Firewall.CloudflareSync = len(p.Firewall.WebPorts) > 0
+		p.Firewall.CloudflareSync = len(p.Firewall.WebPorts) > 0 && !m.noSync
 		extra, _ := plan.ParsePorts(m.extraPorts)
 		p.Firewall.TailnetPorts = append([]int{m.facts.SSHPort}, extra...)
 		p.Firewall.AllowPing = m.allowPing

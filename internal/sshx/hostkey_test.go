@@ -228,7 +228,17 @@ func TestPinnedHostKeyOfAnyKind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := startServer(t, ec, ed)
+	// A second ECDSA key on another curve: a server presents the first curve
+	// a connection asks for, so each curve is asked for by itself.
+	ek384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ec384, err := ssh.NewSignerFromKey(ek384)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := startServer(t, ec, ec384, ed)
 	kh := filepath.Join(t.TempDir(), "known_hosts")
 	dial := func(p HostKeyPolicy) (ssh.PublicKey, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -241,7 +251,7 @@ func TestPinnedHostKeyOfAnyKind(t *testing.T) {
 		defer c.Close()
 		return c.HostKey, nil
 	}
-	for _, want := range []ssh.Signer{ed, ec} {
+	for _, want := range []ssh.Signer{ed, ec, ec384} {
 		got, err := dial(HostKeyPolicy{Fingerprint: ssh.FingerprintSHA256(want.PublicKey())})
 		if err != nil || got.Type() != want.PublicKey().Type() {
 			t.Fatalf("pinned %s key: %v", want.PublicKey().Type(), err)

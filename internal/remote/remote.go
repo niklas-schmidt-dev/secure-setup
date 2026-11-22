@@ -62,6 +62,7 @@ type Facts struct {
 	Systemd    bool
 	NFT        bool
 	SSHPort    int
+	SSHPorts   []int // every port sshd listens on, SSHPort first
 	WANIface   string
 	WANIfaces  []string // every device with a default route (IPv4 and IPv6), WANIface first
 	PublicNICs []string // network cards with a public address, with or without a default route
@@ -99,6 +100,7 @@ if command -v tailscale >/dev/null 2>&1; then echo TAILSCALE=1; else echo TAILSC
 if command -v docker >/dev/null 2>&1; then echo DOCKER=1; else echo DOCKER=0; fi
 sshd_bin=$(command -v sshd || echo /usr/sbin/sshd)
 printf 'SSHPORT=%s\n' "$("$sshd_bin" -T 2>/dev/null | awk '$1=="port"{print $2; exit}')"
+printf 'SSHPORTS=%s\n' "$("$sshd_bin" -T 2>/dev/null | awk '$1=="port"{printf "%s ", $2}')"
 printf 'WAN=%s\n' "$(ip -o -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
 printf 'WAN6=%s\n' "$(ip -o -6 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
 printf 'WANS=%s\n' "$({ ip -o -4 route show default; ip -o -6 route show default; } 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); break}}' | tr '\n' ' ')"
@@ -132,7 +134,7 @@ const onCardScript = `oncard() {
 
 // detectKeys are the facts detectScript prints. Other lines are ignored, so
 // a server cannot fill the map with keys of its own.
-var detectKeys = []string{"ID", "ID_LIKE", "CODENAME", "PRETTY", "HOSTNAME", "SYSTEMD", "PKG", "NFT", "TAILSCALE", "DOCKER", "SSHPORT", "WAN", "WAN6", "WANS", "WANIP", "WANIP6", "NICADDRS", "UFW", "FIREWALLD", "FIREWALLD_ENABLED", "SS_TABLE", "ROLLED_BACK", "ROLLBACK_ARMED"}
+var detectKeys = []string{"ID", "ID_LIKE", "CODENAME", "PRETTY", "HOSTNAME", "SYSTEMD", "PKG", "NFT", "TAILSCALE", "DOCKER", "SSHPORT", "SSHPORTS", "WAN", "WAN6", "WANS", "WANIP", "WANIP6", "NICADDRS", "UFW", "FIREWALLD", "FIREWALLD_ENABLED", "SS_TABLE", "ROLLED_BACK", "ROLLBACK_ARMED"}
 
 // Detect gathers Facts about the server. Their text is shown in the wizard's
 // forms, so control characters are replaced (see Printable).
@@ -182,6 +184,12 @@ func Detect(ctx context.Context, c Host) (*Facts, error) {
 	f.SSHPort, _ = strconv.Atoi(kv["SSHPORT"])
 	if f.SSHPort == 0 {
 		f.SSHPort = 22
+	}
+	f.SSHPorts = []int{f.SSHPort}
+	for _, s := range strings.Fields(kv["SSHPORTS"]) {
+		if n, err := strconv.Atoi(s); err == nil && !slices.Contains(f.SSHPorts, n) {
+			f.SSHPorts = append(f.SSHPorts, n)
+		}
 	}
 	if f.Tailscale {
 		if st, err := TailscaleStatus(ctx, c); err == nil {

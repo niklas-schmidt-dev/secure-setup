@@ -50,6 +50,22 @@ func TestWizardKeepsCustomWebPorts(t *testing.T) {
 	}
 }
 
+// A plan with web ports and without the daily refresh keeps it off through
+// the wizard; the default plan keeps it on.
+func TestWizardKeepsRefreshOff(t *testing.T) {
+	for off, want := range map[bool]bool{true: false, false: true} {
+		p := plan.Default()
+		p.Server.Host = "203.0.113.10"
+		p.Firewall.CloudflareSync = !off
+		m := wizardModel(t, &p)
+		m.phase = phaseFirewall
+		m.advance()
+		if p.Firewall.CloudflareSync != want || len(p.Firewall.WebPorts) == 0 {
+			t.Errorf("refresh off in the plan: %v, after the wizard cloudflare_sync is %v", off, p.Firewall.CloudflareSync)
+		}
+	}
+}
+
 // The review can go back to the questions with every answer still filled in,
 // and quitting there leaves without a run.
 func TestReviewCanGoBack(t *testing.T) {

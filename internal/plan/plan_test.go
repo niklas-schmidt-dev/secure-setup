@@ -105,6 +105,17 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), `"web_port"`) {
 		t.Fatalf("the misspelt field was accepted: %v", err)
 	}
+	// One plan per file: a second object, or a stray brace, is no plan.
+	for _, tail := range []string{`{"firewall":{"web_ports":[]}}`, `}`, `x`} {
+		write(`{"server":{"host":"203.0.113.10"}}` + "\n" + tail)
+		if _, err := Load(path); err == nil {
+			t.Errorf("text after the plan (%q) was accepted", tail)
+		}
+	}
+	write(`{"server":{"host":"203.0.113.10"}}` + "\n\n")
+	if _, err := Load(path); err != nil {
+		t.Fatalf("a plan with trailing newlines: %v", err)
+	}
 }
 
 // A pinned host key is a SHA256 fingerprint; anything else is refused before
@@ -165,6 +176,11 @@ func TestValidatePublicPorts(t *testing.T) {
 		if err := p.Validate(); err == nil {
 			t.Errorf("public_tcp_ports with %s accepted", name)
 		}
+	}
+	// A web port over UDP is HTTP/3, open to everyone past Cloudflare.
+	p.Firewall.PublicTCPPorts, p.Firewall.PublicUDPPorts = nil, []int{443}
+	if err := p.Validate(); err == nil {
+		t.Error("public_udp_ports with a web port accepted")
 	}
 }
 

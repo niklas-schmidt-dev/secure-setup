@@ -163,6 +163,11 @@ out=$(d exec "$cli" ssh -S /tmp/cm "root@$prvip" secure-setup confirm 2>&1 || tr
 echo "$out" | grep -q "was already open when the new rules went live" || fail "confirm accepted a connection from before the apply: $out"
 d exec "$srv" grep -q "EXIT=" /root/run2.log && { d exec "$srv" tail -20 /root/run2.log; fail "confirm over the old connection confirmed the rules"; }
 echo "   confirm refused the connection that was open before the apply"
+# A login from the server to its own private address goes over lo, past the
+# rules.
+out=$(d exec "$srv" sh -c "SSH_CONNECTION='$prvip 50003 $prvip 22' secure-setup confirm 2>&1 || true")
+echo "$out" | grep -q "comes from this machine itself" || fail "confirm accepted a session from the server itself: $out"
+echo "   confirm refused a session from the server itself"
 # A session the server's TCP table does not show, as with Tailscale SSH, which
 # ends inside tailscaled: there the command is the only confirmation.
 out=$(d exec "$srv" sh -c "SSH_CONNECTION='$cliprv 50002 $prvip 22' secure-setup confirm 2>&1 || true")

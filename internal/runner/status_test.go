@@ -96,6 +96,7 @@ func TestReadStatus(t *testing.T) {
 		"rules gone":         {lines: without(without(lockedDown(), "TABLE"), "RULE"), host: func(h *lockdownHost) { h.table = "" }, want: "the firewall rules are not loaded"},
 		"policy accept":      {lines: append(without(lockedDown(), "RULE=type"), "RULE=type filter hook input priority filter; policy accept;"), want: "does not drop by default"},
 		"no admin rule":      {lines: without(lockedDown(), "RULE=iifname"), want: "no rule for the private network"},
+		"sshd port left out": {lines: append(without(lockedDown(), "RULE=iifname"), `RULE=iifname "tailscale0" tcp dport 8080 counter packets 0 bytes 0 accept`), want: "does not let sshd's port 22 in"},
 		"not persisted":      {lines: without(lockedDown(), "PERSISTED"), want: "would not survive a reboot"},
 		"not confirmed":      {lines: append(lockedDown(), "ROLLBACK_PENDING=1"), want: "still wait for their confirmation"},
 		"empty ranges":       {lines: append(without(without(lockedDown(), "CF4"), "CF6"), "CF4=0", "CF6=0"), want: "the Cloudflare ranges are empty"},

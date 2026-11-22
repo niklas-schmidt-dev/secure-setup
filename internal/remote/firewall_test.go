@@ -254,6 +254,18 @@ func TestDetectListsEveryDefaultRouteDevice(t *testing.T) {
 	}
 }
 
+// sshd can listen on several ports; all of them are known, the first one
+// is the one the run uses.
+func TestDetectListsEverySSHPort(t *testing.T) {
+	f, err := Detect(context.Background(), &recordHost{stdout: func(string) string { return "SYSTEMD=1\nSSHPORT=22\nSSHPORTS=22 2222 \n" }})
+	if err != nil || f.SSHPort != 22 || !slices.Equal(f.SSHPorts, []int{22, 2222}) {
+		t.Fatalf("ports %d %v, err %v", f.SSHPort, f.SSHPorts, err)
+	}
+	if f, _ := Detect(context.Background(), &recordHost{}); f.SSHPort != 22 || !slices.Equal(f.SSHPorts, []int{22}) {
+		t.Fatalf("without an answer: %d %v", f.SSHPort, f.SSHPorts)
+	}
+}
+
 // A server without IPv4 has its IPv6 default-route interface as the internet
 // interface and its IPv6 address as the public one.
 func TestDetectIPv6Only(t *testing.T) {

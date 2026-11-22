@@ -79,10 +79,13 @@ type Client struct {
 }
 
 // hostKeyTypes are the kinds of host key a server may have. It presents one
-// per connection: the first kind in the client's list that it has.
+// per connection: the first kind in the client's list that it has. The two
+// RSA entries are signature algorithms of the same key.
 var hostKeyTypes = [][]string{
 	{ssh.KeyAlgoED25519},
-	{ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521},
+	{ssh.KeyAlgoECDSA256},
+	{ssh.KeyAlgoECDSA384},
+	{ssh.KeyAlgoECDSA521},
 	{ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSASHA512},
 }
 

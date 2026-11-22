@@ -32,12 +32,16 @@ func TestTargetFromPlan(t *testing.T) {
 		}
 		return p
 	}
-	tailnet := write("ts.json", `{"server":{"host":"203.0.113.10","port":2222,"user":"deploy","key_path":"/k"},"tailscale":{"hostname":"web-1"}}`)
+	tailnet := write("ts.json", `{"server":{"host":"203.0.113.10","port":2222,"user":"deploy","key_path":"/k","host_key":"SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8"},"tailscale":{"hostname":"web-1"}}`)
 	existing := write("net.json", `{"server":{"host":"203.0.113.10"},"tailscale":{"use_existing_network":true,"admin_interface":"eth1","admin_address":"10.0.0.5"}}`)
 	unnamed := write("unnamed.json", `{"server":{"host":"203.0.113.10"}}`)
 	local := write("local.json", `{"local":true}`)
 
 	tg, err := resolved(t, "-f", tailnet)
+	// The plan's pinned host key holds for these connections too.
+	if tg.hostKey != "SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8" {
+		t.Fatalf("the plan's host key was dropped: %q", tg.hostKey)
+	}
 	if err != nil || *tg.host != "web-1" || *tg.port != 2222 || *tg.user != "deploy" || *tg.key != "/k" || *tg.here {
 		t.Fatalf("tailnet plan: %v host %q port %d user %q key %q", err, *tg.host, *tg.port, *tg.user, *tg.key)
 	}

@@ -138,7 +138,7 @@ when it ends.
 | `/usr/local/sbin/secure-setup-cloudflare-sync` | refreshes the ranges; run daily by `secure-setup-cloudflare-sync.timer` |
 | `/etc/ssh/sshd_config.d/00-secure-setup.conf` | password login off, root login with keys only |
 | `/var/lib/secure-setup/` | rollback script and the previous ruleset; `decided` once the confirmation or the rollback timer claimed an apply's outcome; `rolled-back` appears if a rollback ever fired |
-| `/etc/apt/apt.conf.d/52secure-setup-auto-upgrades` | with `auto_updates` on Debian and Ubuntu: turns unattended-upgrades on. On Fedora and the RHEL family the dnf-automatic timer is enabled instead (`/etc/dnf/dnf5-plugins/automatic.conf` with dnf 5) |
+| `/etc/apt/apt.conf.d/52secure-setup-auto-upgrades` | with `auto_updates` on Debian and Ubuntu: turns unattended-upgrades on. On Fedora and the RHEL family the dnf-automatic timer is enabled instead (with dnf 5, `/etc/systemd/system/dnf5-automatic.service.d/secure-setup.conf` makes its service install what it downloads) |
 | `/etc/secure-setup/plan.json` | the answers of a `here` run, for `secure-setup here -f` next time |
 | `/etc/secure-setup/cloudflared.token` | optional Cloudflare Tunnel token, mode 0600, read by cloudflared through `--token-file` |
 | `secure-setup-cloudflared.service` | optional outbound tunnel; connects before the firewall is applied and is checked again after reboot |

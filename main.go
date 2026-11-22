@@ -221,7 +221,7 @@ func cmdConfirm(ctx context.Context) error {
 		}
 		return errors.New("this is not an SSH session; run `secure-setup confirm` in a new SSH login over the tailnet")
 	}
-	if err := runner.CheckConfirm(expect, client, server); err != nil {
+	if err := runner.CheckConfirm(expect, client, server, remote.LocalAddrs(ctx, host)); err != nil {
 		return err
 	}
 	if err := host.WriteFile(ctx, runner.ConfirmedPath, []byte(client.String()+"\n"), "0600"); err != nil {
@@ -455,6 +455,7 @@ type target struct {
 	file            *string
 	port            *int
 	here            *bool
+	hostKey         string // the plan's pinned host key
 }
 
 func targetFlags(fs *flag.FlagSet) *target {
@@ -493,6 +494,7 @@ func (t *target) resolve() error {
 			if !set["key"] {
 				*t.key = p.Server.KeyPath
 			}
+			t.hostKey = p.Server.HostKey
 			if !set["host"] && !*t.here {
 				switch {
 				case p.Tailscale.UseExisting:
@@ -528,7 +530,7 @@ func (t *target) connect(ctx context.Context, prompt textui.Prompter) (remote.Ho
 		return h, func() {}, nil
 	}
 	auth := sshx.Auth{User: *t.user, KeyPath: *t.key, Password: os.Getenv("SECURE_SETUP_PASSWORD"), Passphrase: os.Getenv("SECURE_SETUP_PASSPHRASE")}
-	c, err := sshx.Dial(ctx, net.JoinHostPort(*t.host, strconv.Itoa(*t.port)), auth, sshx.HostKeyPolicy{Prompter: prompt})
+	c, err := sshx.Dial(ctx, net.JoinHostPort(*t.host, strconv.Itoa(*t.port)), auth, sshx.HostKeyPolicy{Prompter: prompt, Fingerprint: t.hostKey})
 	if err != nil {
 		return nil, nil, err
 	}
