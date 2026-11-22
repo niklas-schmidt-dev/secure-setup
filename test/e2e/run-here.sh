@@ -62,6 +62,7 @@ plan() {
 {
   "local": true,
   "update_system": false,
+  "auto_updates": false,
   "reboot": false,
   "tailscale": {"admin_interface": "eth1", "udp_port": 41641, "use_existing_network": true, "admin_address": "$prvip"},
   "firewall": {"web_ports": [443], "allow_ping": true, "tailnet_ports": [22, 8080], "rollback_seconds": 30, "cloudflare_sync": true, "confirm_by": "$2"},
@@ -81,6 +82,23 @@ d exec "$srv" grep -q "rolled back to its previous rules" /root/run0.log || { d 
 d exec "$srv" grep -q "EXIT=1" /root/run0.log || fail "run 0 should exit 1"
 d exec "$srv" nft list table inet secure_setup >/dev/null 2>&1 && fail "table present after rollback with no previous state" || echo "   rolled back: table removed, public ssh open"
 d exec "$cli" nc -z -w 5 "$pubip" 22 || fail "public ssh not open after rollback"
+
+echo "== run 0b: a second run must not build on the unconfirmed rules of a run that died"
+d exec -d "$srv" sh -c 'secure-setup here -f /root/plan-login.json --yes > /root/run0a.log 2>&1'
+wait_log /root/run0a.log "Now prove the new rules" 60
+d exec "$srv" pkill -9 -f 'secure-setup here' || fail "the first run was not running"
+d exec "$srv" nft list table inet secure_setup >/dev/null 2>&1 || fail "the dead run's rules are not live"
+d exec "$srv" systemctl is-active --quiet secure-setup-rollback.timer || fail "the dead run's rollback timer is not armed"
+d exec -d "$srv" sh -c 'secure-setup here -f /root/plan-login.json --yes > /root/run0b.log 2>&1'
+wait_log /root/run0b.log "the firewall of an earlier run still waits for its confirmation" 20
+wait_log /root/run0b.log "Now prove the new rules" 90
+d exec "$srv" grep -q "an earlier secure-setup run rolled its firewall back" /root/run0b.log || { d exec "$srv" cat /root/run0b.log; fail "the second run did not start from the rolled-back state"; }
+d exec "$srv" grep -q "no previous secure-setup table; rollback removes the new one" /root/run0b.log || { d exec "$srv" cat /root/run0b.log; fail "the second run saved the dead run's unconfirmed rules as the state to roll back to"; }
+echo "   the second run waited for the dead run's rollback and staged from the state before it"
+d exec "$srv" pkill -9 -f 'secure-setup here' || true
+d exec "$srv" secure-setup undo --here --yes >/dev/null
+d exec "$srv" nft list table inet secure_setup >/dev/null 2>&1 && fail "table present after undo"
+d exec "$cli" nc -z -w 5 "$pubip" 22 || fail "public ssh not open after undo"
 
 echo "== install the client's key on the server"
 d exec "$srv" sh -c "mkdir -p /root/.ssh && printf '%s\n' '$pubkey' > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys"
@@ -117,8 +135,11 @@ d exec "$srv" grep -q 'Managed by secure-setup' /etc/nftables.conf && echo "   /
 d exec "$srv" test -f /var/lib/secure-setup/confirm-expect && fail "confirm-expect left behind" || echo "   confirm markers cleaned"
 d exec "$srv" grep -q "Confirmed by.*login by root from $cliprv" /root/run1.log || fail "summary does not name the confirming login"
 echo "   summary names the confirming login"
+d exec "$srv" secure-setup status --here >/tmp/e2e-here-status.log 2>&1 || { cat /tmp/e2e-here-status.log; fail "status found problems after run 1"; }
+grep -q "TCP 22, 8080 on eth1 to $prvip only" /tmp/e2e-here-status.log && grep -q "No problems found" /tmp/e2e-here-status.log || { cat /tmp/e2e-here-status.log; fail "status --here does not show the lockdown"; }
+echo "   status --here: no problems"
 
-echo "== run 2: a session from BEFORE the apply must not count; \`secure-setup confirm\` in it must"
+echo "== run 2: a connection from BEFORE the apply must not count, not even with \`secure-setup confirm\`"
 # ControlMaster: one TCP connection opened before the apply, reused for the
 # confirm command, so no new session appears to the automatic detection.
 d exec -d "$cli" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i /root/.ssh/id_ed25519 -M -S /tmp/cm -N "root@$prvip"
@@ -126,19 +147,36 @@ for i in $(seq 1 10); do d exec "$cli" ssh -S /tmp/cm -O check "root@$prvip" >/d
 d exec "$cli" ssh -S /tmp/cm -O check "root@$prvip" >/dev/null 2>&1 || fail "control master did not come up"
 d exec -d "$srv" sh -c 'secure-setup here -f /root/plan-login.json --yes > /root/run2.log 2>&1; echo "EXIT=$?" >> /root/run2.log'
 wait_log /root/run2.log "Now prove the new rules" 90
-sleep 7
+sleep 5
 d exec "$srv" grep -q "EXIT=" /root/run2.log && { d exec "$srv" tail -20 /root/run2.log; fail "the old session was counted as a confirmation"; }
 d exec "$srv" test -f /var/lib/secure-setup/confirm-expect || fail "confirm-expect missing while waiting"
 echo "   old session correctly ignored"
+out=$(d exec "$srv" secure-setup status --here 2>&1 || true)
+echo "$out" | grep -q "still wait for their confirmation" || fail "status does not say the rules are unconfirmed: $out"
+echo "   status --here: the loaded rules are not confirmed yet"
 out=$(d exec "$srv" sh -c "SSH_CONNECTION='10.250.100.3 50001 $pubip 22' secure-setup confirm 2>&1 || true")
 echo "$out" | grep -q "came in over $pubip, not $prvip" || fail "confirm accepted a public-address session: $out"
 echo "   confirm refused a session over the public address"
-d exec "$cli" ssh -S /tmp/cm "root@$prvip" secure-setup confirm | grep -q "confirmed: this session arrived over $prvip" || fail "secure-setup confirm failed in the private session"
+# The shared connection stays open under any rules, so a new session on it
+# says nothing about them.
+out=$(d exec "$cli" ssh -S /tmp/cm "root@$prvip" secure-setup confirm 2>&1 || true)
+echo "$out" | grep -q "was already open when the new rules went live" || fail "confirm accepted a connection from before the apply: $out"
+d exec "$srv" grep -q "EXIT=" /root/run2.log && { d exec "$srv" tail -20 /root/run2.log; fail "confirm over the old connection confirmed the rules"; }
+echo "   confirm refused the connection that was open before the apply"
+# A login from the server to its own private address goes over lo, past the
+# rules.
+out=$(d exec "$srv" sh -c "SSH_CONNECTION='$prvip 50003 $prvip 22' secure-setup confirm 2>&1 || true")
+echo "$out" | grep -q "comes from this machine itself" || fail "confirm accepted a session from the server itself: $out"
+echo "   confirm refused a session from the server itself"
+# A session the server's TCP table does not show, as with Tailscale SSH, which
+# ends inside tailscaled: there the command is the only confirmation.
+out=$(d exec "$srv" sh -c "SSH_CONNECTION='$cliprv 50002 $prvip 22' secure-setup confirm 2>&1 || true")
+echo "$out" | grep -q "confirmed: this session arrived over $prvip from $cliprv" || fail "secure-setup confirm failed in a new session: $out"
 wait_log /root/run2.log "EXIT=" 60
 d exec "$cli" ssh -S /tmp/cm -O exit "root@$prvip" >/dev/null 2>&1 || true
 d exec "$srv" grep -q 'confirmed by `secure-setup confirm`' /root/run2.log || { d exec "$srv" tail -20 /root/run2.log; fail "explicit confirm not honoured"; }
 d exec "$srv" grep -q "EXIT=0" /root/run2.log || fail "run 2 should exit 0"
-echo "   explicit confirm accepted"
+echo "   explicit confirm in a new session accepted"
 
 echo "== run 3: self-check confirmation (unattended), no login at all"
 plan /root/plan-self.json self
@@ -150,10 +188,16 @@ d exec "$srv" grep -q "Confirmed by.*self-checks" /root/run3.log || fail "summar
 d exec "$srv" systemctl is-active --quiet secure-setup-rollback.timer && fail "rollback timer still armed after self-confirm" || echo "   self-confirmed; timer cancelled"
 if d exec "$cli" nc -z -w 5 "$pubip" 22; then fail "public ssh open after self-confirm"; else echo "   public ssh still blocked"; fi
 
-echo "== run 4: apply -f with a local plan takes the same path"
-d exec "$srv" sh -c 'secure-setup apply -f /root/plan-self.json --yes > /root/run4.log 2>&1; echo "EXIT=$?" >> /root/run4.log' || true
+echo "== run 4: apply -f with a local plan takes the same path; without web ports the refresh timer goes"
+d exec "$srv" sh -c 'sed "s/\"web_ports\": \[443\]/\"web_ports\": []/" /root/plan-self.json > /root/plan-noweb.json'
+d exec "$srv" grep -q '"web_ports": \[\]' /root/plan-noweb.json || fail "plan without web ports not written"
+d exec "$srv" sh -c 'secure-setup apply -f /root/plan-noweb.json --yes > /root/run4.log 2>&1; echo "EXIT=$?" >> /root/run4.log' || true
 d exec "$srv" grep -q "EXIT=0" /root/run4.log || { d exec "$srv" tail -20 /root/run4.log; fail "apply with local plan failed"; }
-echo "   ok"
+d exec "$srv" grep -q "daily Cloudflare range refresh switched off" /root/run4.log || { d exec "$srv" tail -20 /root/run4.log; fail "the refresh timer of the earlier run was not switched off"; }
+d exec "$srv" systemctl is-enabled --quiet secure-setup-cloudflare-sync.timer && fail "refresh timer still enabled without web ports"
+d exec "$srv" systemctl is-active --quiet secure-setup-cloudflare-sync.timer && fail "refresh timer still active without web ports"
+d exec "$srv" nft list chain inet secure_setup input | grep -q cloudflare && fail "web rule present without web ports"
+echo "   ok; no web rule, refresh timer off"
 
 echo "== run 5: the wizard (TUI) on the server, driven by expect, confirmed by a login"
 d cp test/e2e/here-tui.exp "$srv:/root/here-tui.exp"
@@ -162,11 +206,13 @@ wait_log /root/run5.log "WALK: waiting for login" 120
 sleep 2
 login "$prvip" true || fail "private login during TUI run failed"
 wait_log /root/run5.log "EXIT=" 90
+d exec "$srv" grep -q "WALK: back on the firewall screen" /root/run5.log || { d exec "$srv" grep -a WALK /root/run5.log; fail "the review did not go back to the questions"; }
 d exec "$srv" grep -q "WALK: done screen" /root/run5.log || { d exec "$srv" tail -40 /root/run5.log; fail "TUI did not reach the done screen"; }
 d exec "$srv" grep -q "EXIT=0" /root/run5.log || { d exec "$srv" tail -40 /root/run5.log; fail "TUI run failed"; }
 d exec "$srv" grep -q '"confirm_by": "login"' /etc/secure-setup/plan.json || fail "TUI did not save the local plan"
 d exec "$srv" grep -q '"local": true' /etc/secure-setup/plan.json || fail "saved plan is not marked local"
-echo "   TUI walked all screens, saved /etc/secure-setup/plan.json, confirmed by login"
+d exec "$srv" systemctl is-active --quiet secure-setup-cloudflare-sync.timer || fail "refresh timer not back with web ports"
+echo "   TUI walked all screens, went back from the review once, saved /etc/secure-setup/plan.json, confirmed by login"
 
 echo "== run 6: reboot at the end; the boot check reports after the restart"
 d exec "$srv" sh -c 'sed "s/\"reboot\": false/\"reboot\": true/" /root/plan-self.json > /root/plan-reboot.json'

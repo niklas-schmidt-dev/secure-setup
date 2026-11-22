@@ -68,6 +68,65 @@ func TestPrepareDoesNotRetireHostFirewall(t *testing.T) {
 	}
 }
 
+// Staging looks once more for the unconfirmed rules of another run before it
+// writes anything: its files are that run's rollback and its ruleset.
+func TestStagingLeavesAnotherRunAlone(t *testing.T) {
+	h := &recordHost{}
+	if err := PrepareFirewall(context.Background(), h, &Facts{PkgMgr: "apt-get", NFT: true}, FirewallFiles{Ruleset: "x", Elements: "y"}, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	first := h.scripts[0]
+	check, write := strings.Index(first, "if "+rollbackPendingTest+"; then"), strings.Index(first, "mkdir -p "+StateDir)
+	if check != 0 || write < check || !strings.Contains(first[:write], "exit 1") {
+		t.Fatalf("the first staging script must refuse before it writes:\n%s", first)
+	}
+}
+
+// sshd can listen on several ports, by Port or by ListenAddress. The list of
+// open connections covers all of them, and a failing ss is an error: an empty
+// list would let a connection from before the apply pass as new.
+func TestSessionsCoverEverySSHPort(t *testing.T) {
+	var cmd string
+	h := &recordHost{output: func(c string) string { cmd = c; return "0 0 100.64.0.5:2222 100.64.0.9:41000" }}
+	got, err := Sessions(context.Background(), h, 22, 2222)
+	if err != nil || len(got) != 1 || !strings.Contains(cmd, "'( sport = :22 or sport = :2222 )'") || strings.Contains(cmd, "|| true") {
+		t.Fatalf("sessions %v, err %v, command %q", got, err, cmd)
+	}
+	if _, err := Sessions(context.Background(), &bareHost{}, 22); err == nil {
+		t.Fatal("a failing ss gave an empty list")
+	}
+	if !strings.Contains(detectScript, `$1=="listenaddress"{n=split($2,a,":"); printf "%s ", a[n]}`) {
+		t.Fatal("detect does not read the ports of ListenAddress")
+	}
+	f := &Facts{SSHPort: 22}
+	if !slices.Equal(f.AllSSHPorts(), []int{22}) {
+		t.Fatalf("AllSSHPorts without a list: %v", f.AllSSHPorts())
+	}
+}
+
+// Staging switches connection tracking on, so the sessions that are open are
+// established connections by the time the rules drop everything else; the
+// table that did it goes once the rules are loaded, also when loading fails.
+func TestTrackingStartsBeforeTheRulesLoad(t *testing.T) {
+	h := &recordHost{}
+	if err := PrepareFirewall(context.Background(), h, &Facts{PkgMgr: "apt-get", NFT: true}, FirewallFiles{Ruleset: "x", Elements: "y"}, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	stage := h.all()
+	if !strings.Contains(stage, "table inet "+TrackTable+" {") || !strings.Contains(stage, "policy accept; ct state new counter;") || strings.Contains(stage, "nft -f "+PendingPath) {
+		t.Fatalf("staging must start tracking and load no rules:\n%s", stage)
+	}
+	h = &recordHost{}
+	if err := ApplyFirewall(context.Background(), h, 60, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	s := h.all()
+	load, live := strings.Index(s, "if ! nft -f "+PendingPath), strings.Index(s, `echo "new firewall rules are live"`)
+	if n := strings.Count(s, "nft delete table inet "+TrackTable); n != 2 || !strings.Contains(s[load:live], "nft delete table inet "+TrackTable) {
+		t.Fatalf("the tracking table must go after the load, on both outcomes (%d deletes):\n%s", n, s)
+	}
+}
+
 // Apply stops the host firewall only after the timer is armed, and brings it
 // back when the new rules fail to load; the rollback brings it back too.
 func TestApplyAndRollbackRestoreHostFirewall(t *testing.T) {
@@ -186,6 +245,24 @@ func TestConfirmRetiresAndMasks(t *testing.T) {
 	}
 }
 
+// A confirmed plan without the Cloudflare refresh switches off the timer an
+// earlier run enabled; one with it enables the timer.
+func TestConfirmSwitchesTheSyncTimer(t *testing.T) {
+	for sync, want := range map[bool]string{
+		false: "systemctl disable --now " + SyncUnit + ".timer",
+		true:  "systemctl enable --now " + SyncUnit + ".timer",
+	} {
+		h := &recordHost{}
+		if err := ConfirmFirewall(context.Background(), h, &Facts{}, sync, func(string) {}); err != nil {
+			t.Fatal(err)
+		}
+		s := h.all()
+		if stop, at := strings.Index(s, "systemctl stop "+RollbackUnit+".timer"), strings.Index(s, want); stop < 0 || at < stop {
+			t.Fatalf("sync %v: %q must come after the confirmation:\n%s", sync, want, s)
+		}
+	}
+}
+
 func TestDetectReadsFirewalldEnablement(t *testing.T) {
 	if !strings.Contains(detectScript, "is-enabled --quiet firewalld") {
 		t.Fatal("detect does not ask whether firewalld is enabled at boot")
@@ -210,6 +287,31 @@ func TestDetectListsEveryDefaultRouteDevice(t *testing.T) {
 		if f.WANIface != c.primary || !slices.Equal(f.WANIfaces, c.all) {
 			t.Fatalf("%q: WANIface %q WANIfaces %q, want %q %q", c.out, f.WANIface, f.WANIfaces, c.primary, c.all)
 		}
+	}
+}
+
+// sshd can listen on several ports; all of them are known, the first one
+// is the one the run uses.
+func TestDetectListsEverySSHPort(t *testing.T) {
+	f, err := Detect(context.Background(), &recordHost{stdout: func(string) string { return "SYSTEMD=1\nSSHPORT=22\nSSHPORTS=22 2222 \n" }})
+	if err != nil || f.SSHPort != 22 || !slices.Equal(f.SSHPorts, []int{22, 2222}) {
+		t.Fatalf("ports %d %v, err %v", f.SSHPort, f.SSHPorts, err)
+	}
+	if f, _ := Detect(context.Background(), &recordHost{}); f.SSHPort != 22 || !slices.Equal(f.SSHPorts, []int{22}) {
+		t.Fatalf("without an answer: %d %v", f.SSHPort, f.SSHPorts)
+	}
+}
+
+// A server without IPv4 has its IPv6 default-route interface as the internet
+// interface and its IPv6 address as the public one.
+func TestDetectIPv6Only(t *testing.T) {
+	out := "SYSTEMD=1\nWAN=\nWAN6=ens3\nWANS=ens3 \nWANIP6=2001:db8::10\n"
+	f, err := Detect(context.Background(), &recordHost{stdout: func(string) string { return out }})
+	if err != nil || f.WANIface != "ens3" || f.WANIPv4 != "" || f.WANIPv6 != "2001:db8::10" {
+		t.Fatalf("facts %+v, err %v", f, err)
+	}
+	if !strings.Contains(detectScript, "ip -o -6 addr show dev \"$wan6\" scope global") {
+		t.Fatal("detect does not read the IPv6 address of the IPv6 uplink")
 	}
 }
 
@@ -453,7 +555,8 @@ func TestBootFileWiring(t *testing.T) {
 	if err := PrepareFirewall(context.Background(), h, &Facts{NFT: true}, FirewallFiles{Ruleset: "x"}, func(string) {}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(h.scripts[0], NFTBootFileScript) || !strings.Contains(h.scripts[0], `if [ -z "$boot" ]`) {
+	// Before anything is written; only the look for another run's rules comes earlier.
+	if boot, write := strings.Index(h.scripts[0], NFTBootFileScript+`if [ -z "$boot" ]`), strings.Index(h.scripts[0], "mkdir -p "+StateDir); boot < 0 || write < boot {
 		t.Fatal("staging does not check the boot file first")
 	}
 	h = &recordHost{}
@@ -494,6 +597,36 @@ func TestTailscaleUpLeavesSSHOff(t *testing.T) {
 	h = &recordHost{}
 	if err := TailscaleSetSSH(context.Background(), h, true, nil); err != nil || !strings.Contains(h.all(), "tailscale set --ssh=true") {
 		t.Fatalf("set ssh: %v %s", err, h.all())
+	}
+}
+
+// Tags and a control server of one's own reach `tailscale up` as flags, and
+// the login link is then looked for on that server.
+func TestTailscaleUpTagsAndLoginServer(t *testing.T) {
+	h := &recordHost{stdout: func(string) string {
+		return "To authenticate, visit:\n\n\thttps://hs.example.com/register/abc123\n\thttps://login.tailscale.com/a/zzz\n"
+	}}
+	var url string
+	o := UpOptions{Hostname: "web-1", Tags: []string{"tag:server", "tag:web"}, LoginServer: "https://hs.example.com/"}
+	if err := TailscaleUp(context.Background(), h, o, func(string) {}, func(u string) { url = u }); err != nil {
+		t.Fatal(err)
+	}
+	s := h.all()
+	if !strings.Contains(s, "--advertise-tags='tag:server,tag:web'") || !strings.Contains(s, "--login-server='https://hs.example.com/'") {
+		t.Fatalf("tailscale up: %s", s)
+	}
+	if url != "https://hs.example.com/register/abc123" {
+		t.Fatalf("login link %q", url)
+	}
+	// Without them the command is what it was, and only Tailscale's own
+	// login server gives a login link.
+	h = &recordHost{stdout: func(string) string { return "https://evil.example/a/x https://login.tailscale.com/a/abc" }}
+	url = ""
+	if err := TailscaleUp(context.Background(), h, UpOptions{Hostname: "web-1"}, func(string) {}, func(u string) { url = u }); err != nil {
+		t.Fatal(err)
+	}
+	if s := h.all(); strings.Contains(s, "--advertise-tags") || strings.Contains(s, "--login-server") || url != "https://login.tailscale.com/a/abc" {
+		t.Fatalf("plain join: %s, link %q", s, url)
 	}
 }
 

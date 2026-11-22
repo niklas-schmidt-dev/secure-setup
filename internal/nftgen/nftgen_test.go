@@ -21,6 +21,8 @@ func TestRenderGolden(t *testing.T) {
 		// address: administration only to the private address, forwarding
 		// from the card filtered like the internet.
 		"existing-network": {AdminInterface: "eth1", AdminAddress: netip.MustParseAddr("10.0.0.5"), WANInterface: "eth0", ExtraWAN: []string{"eth1"}, TailnetTCPPorts: []int{22}, WebPorts: []int{443}},
+		// Ports the plan opens to everyone: a mail server and WireGuard.
+		"public-ports": {WANInterface: "eth0", TailnetTCPPorts: []int{22}, WebPorts: []int{443}, PublicTCPPorts: []int{587, 25}, PublicUDPPorts: []int{51820}},
 	}
 	for name, p := range cases {
 		t.Run(name, func(t *testing.T) {

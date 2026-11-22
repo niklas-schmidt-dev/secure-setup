@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -168,19 +169,20 @@ func LoginUser() string {
 	return "root"
 }
 
-// SSHSession parses SSH_CONNECTION ("client port server port") into the
-// client and server addresses of the session secure-setup runs in. Both are
-// invalid when there is no SSH session (console, cloud-init) or when sudo
-// dropped the variable.
-func SSHSession() (client, server netip.Addr) {
+// SSHSession parses SSH_CONNECTION ("client port server port") into the two
+// ends of the session secure-setup runs in. Both are invalid when there is
+// no SSH session (console, cloud-init) or when sudo dropped the variable.
+func SSHSession() (client, server netip.AddrPort) {
 	f := strings.Fields(os.Getenv("SSH_CONNECTION"))
 	if len(f) != 4 {
-		return netip.Addr{}, netip.Addr{}
+		return netip.AddrPort{}, netip.AddrPort{}
 	}
-	c, err1 := netip.ParseAddr(f[0])
-	s, err2 := netip.ParseAddr(f[2])
+	c, err1 := netip.ParseAddrPort(net.JoinHostPort(f[0], f[1]))
+	s, err2 := netip.ParseAddrPort(net.JoinHostPort(f[2], f[3]))
 	if err1 != nil || err2 != nil {
-		return netip.Addr{}, netip.Addr{}
+		return netip.AddrPort{}, netip.AddrPort{}
 	}
-	return c.Unmap(), s.Unmap()
+	// Without the zone of a link-local address: the connection table of
+	// the server, which these are compared with, has none.
+	return netip.AddrPortFrom(c.Addr().Unmap().WithZone(""), c.Port()), netip.AddrPortFrom(s.Addr().Unmap().WithZone(""), s.Port())
 }

@@ -8,6 +8,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +18,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -56,6 +59,7 @@ type HostKeyPolicy struct {
 	KnownHostsPath string          // defaults to ~/.ssh/known_hosts
 	Prompter       HostKeyPrompter // asked for unknown hosts; nil rejects them
 	Expect         ssh.PublicKey   // when set, the server must present exactly this key
+	Fingerprint    string          // when set, the server's key must have this SHA256 fingerprint ("SHA256:...")
 	Warn           func(string)    // optional, for non-fatal notes
 }
 
@@ -74,8 +78,61 @@ type Client struct {
 	conn    *ssh.Client
 }
 
+// hostKeyTypes are the kinds of host key a server may have. It presents one
+// per connection: the first kind in the client's list that it has. The two
+// RSA entries are signature algorithms of the same key.
+var hostKeyTypes = [][]string{
+	{ssh.KeyAlgoED25519},
+	{ssh.KeyAlgoECDSA256},
+	{ssh.KeyAlgoECDSA384},
+	{ssh.KeyAlgoECDSA521},
+	{ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSASHA512},
+}
+
+// algosFor lists the algorithms under which a server presents key.
+func algosFor(key ssh.PublicKey) []string {
+	switch t := key.Type(); t {
+	case ssh.KeyAlgoRSA:
+		return []string{ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSASHA512}
+	case ssh.KeyAlgoED25519, ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521:
+		return []string{t}
+	}
+	return plainHostKeyAlgos
+}
+
 // Dial connects and verifies the host key.
 func Dial(ctx context.Context, addr string, auth Auth, policy HostKeyPolicy) (*Client, error) {
+	switch {
+	case policy.Expect != nil:
+		// Ask for that key's kind, or a server with several host keys could
+		// present another one.
+		return dial(ctx, addr, auth, policy, algosFor(policy.Expect))
+	case policy.Fingerprint == "":
+		return dial(ctx, addr, auth, policy, policy.knownFirst(addr))
+	}
+	// The pinned key can be of any kind: ask for each in turn.
+	var mismatch, last error
+	for _, algos := range hostKeyTypes {
+		c, err := dial(ctx, addr, auth, policy, algos)
+		var noSuchKey *ssh.AlgorithmNegotiationError
+		switch {
+		case err == nil:
+			return c, nil
+		case errors.Is(err, ErrHostKeyMismatch):
+			mismatch = err
+		case errors.As(err, &noSuchKey):
+			last = err
+		default:
+			return nil, err
+		}
+	}
+	if mismatch != nil {
+		return nil, mismatch
+	}
+	return nil, last
+}
+
+func dial(ctx context.Context, addr string, auth Auth, policy HostKeyPolicy, hostKeyAlgos []string) (*Client, error) {
 	methods, err := authMethods(auth)
 	if err != nil {
 		return nil, err
@@ -84,10 +141,11 @@ func Dial(ctx context.Context, addr string, auth Auth, policy HostKeyPolicy) (*C
 	cfg := &ssh.ClientConfig{
 		User: auth.User,
 		Auth: methods,
-		// Plain host keys only, in x/crypto's default order, so a server cannot
-		// steer verification into the certificate path, and keys remembered
-		// by earlier runs keep matching.
-		HostKeyAlgorithms: plainHostKeyAlgos,
+		// Plain host keys only, so a server cannot steer verification into
+		// the certificate path. Without an expected key they come in
+		// x/crypto's default order, so keys remembered by earlier runs keep
+		// matching.
+		HostKeyAlgorithms: hostKeyAlgos,
 		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 			if err := policy.check(ctx, hostname, remote, key); err != nil {
 				return err
@@ -413,6 +471,50 @@ func (p HostKeyPolicy) path() string {
 	return filepath.Join(homeDir(), ".ssh", "known_hosts")
 }
 
+// knownFirst is plainHostKeyAlgos with the kinds of key that known_hosts
+// already has for addr in front, as OpenSSH orders them. A server with
+// several host keys presents the first kind it has, and only a kind that is
+// on record can be checked against the record.
+func (p HostKeyPolicy) knownFirst(addr string) []string {
+	cb, err := knownhosts.New(p.path())
+	if err != nil {
+		return plainHostKeyAlgos // check reports what is wrong with the file
+	}
+	_, probe, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return plainHostKeyAlgos
+	}
+	signer, err := ssh.NewSignerFromKey(probe)
+	if err != nil {
+		return plainHostKeyAlgos
+	}
+	// A key the file cannot hold: the error lists the keys it has for addr.
+	var ke *knownhosts.KeyError
+	if !errors.As(cb(addr, hostPort(addr), signer.PublicKey()), &ke) {
+		return plainHostKeyAlgos
+	}
+	var first []string
+	for _, k := range ke.Want {
+		for _, a := range algosFor(k.Key) {
+			if !slices.Contains(first, a) && slices.Contains(plainHostKeyAlgos, a) {
+				first = append(first, a)
+			}
+		}
+	}
+	for _, a := range plainHostKeyAlgos {
+		if !slices.Contains(first, a) {
+			first = append(first, a)
+		}
+	}
+	return first
+}
+
+// hostPort is a net.Addr for an address that is not connected yet.
+type hostPort string
+
+func (hostPort) Network() string  { return "tcp" }
+func (h hostPort) String() string { return string(h) }
+
 func (p HostKeyPolicy) check(ctx context.Context, hostname string, remote net.Addr, key ssh.PublicKey) error {
 	if _, ok := key.(*ssh.Certificate); ok {
 		return fmt.Errorf("%w: %s presented a host certificate, which secure-setup does not verify", ErrHostKeyRejected, hostname)
@@ -421,10 +523,15 @@ func (p HostKeyPolicy) check(ctx context.Context, hostname string, remote net.Ad
 	if err != nil {
 		return err
 	}
-	if p.Expect != nil {
-		if !bytes.Equal(p.Expect.Marshal(), key.Marshal()) {
+	if p.Expect != nil || p.Fingerprint != "" {
+		if p.Expect != nil && !bytes.Equal(p.Expect.Marshal(), key.Marshal()) {
 			return fmt.Errorf("%w for %s: expected %s, got %s", ErrHostKeyMismatch, hostname,
 				ssh.FingerprintSHA256(p.Expect), ssh.FingerprintSHA256(key))
+		}
+		// A pinned fingerprint replaces the question on first contact: the
+		// key is accepted only when it is the one the operator named.
+		if got := ssh.FingerprintSHA256(key); p.Fingerprint != "" && got != p.Fingerprint {
+			return fmt.Errorf("%w for %s: the pinned host key is %s, the server presents %s", ErrHostKeyMismatch, hostname, p.Fingerprint, got)
 		}
 		if mismatch {
 			if p.Warn != nil {

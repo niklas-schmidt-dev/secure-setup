@@ -53,3 +53,20 @@ func TestWriteFileModes(t *testing.T) {
 		t.Fatalf("0644 file got %o", st.Mode().Perm())
 	}
 }
+
+func TestSSHSession(t *testing.T) {
+	for env, want := range map[string][2]string{
+		"100.64.0.9 41000 100.64.0.5 22":       {"100.64.0.9:41000", "100.64.0.5:22"},
+		"::ffff:10.0.0.4 5 ::ffff:10.0.0.1 22": {"10.0.0.4:5", "10.0.0.1:22"},
+		"fd7a::9 41000 fd7a::5 2222":           {"[fd7a::9]:41000", "[fd7a::5]:2222"},
+		"fe80::9%eth1 41000 fe80::5%eth1 22":   {"[fe80::9]:41000", "[fe80::5]:22"},
+		"":                                     {"invalid AddrPort", "invalid AddrPort"},
+		"100.64.0.9 x 100.64.0.5 22":           {"invalid AddrPort", "invalid AddrPort"},
+	} {
+		t.Setenv("SSH_CONNECTION", env)
+		c, s := SSHSession()
+		if c.String() != want[0] || s.String() != want[1] {
+			t.Errorf("SSH_CONNECTION=%q: got %s, %s", env, c, s)
+		}
+	}
+}

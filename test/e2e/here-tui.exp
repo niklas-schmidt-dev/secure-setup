@@ -16,9 +16,9 @@ expect {
 }
 # Web traffic select -> enter (https), extra ports (prefilled 8080) -> enter,
 # ping -> enter, password login -> enter, rollback -> enter, confirmation ->
-# enter, then the page with system update and reboot (No from the plan) ->
-# enter, enter
-foreach i {1 2 3 4 5 6 7 8} { sleep 0.4; send "\r" }
+# enter, then the page with system update, automatic updates and reboot (No
+# from the plan) -> enter, enter, enter
+foreach i {1 2 3 4 5 6 7 8 9} { sleep 0.4; send "\r" }
 expect {
   -re {Review} { puts "\nWALK: review screen" }
   timeout { puts "\nWALK: FAIL no review screen"; exit 1 }
@@ -27,9 +27,20 @@ expect {
   -re {Confirmation.*a new login from another device} { puts "\nWALK: review shows login confirmation" }
   timeout { puts "\nWALK: FAIL review lacks confirmation line"; exit 1 }
 }
+# The review offers Apply, Change the answers and Quit. Change goes back to
+# the firewall page with every answer kept; the second time through, Apply.
 expect {
-  -re {Apply this setup now} { sleep 0.4; send "y" }
+  -re {Apply this setup now} { sleep 0.4; send "j"; sleep 0.4; send "\r" }
   timeout { puts "\nWALK: FAIL no apply question"; exit 1 }
+}
+expect {
+  -re {Web traffic} { puts "\nWALK: back on the firewall screen" }
+  timeout { puts "\nWALK: FAIL Change did not go back to the questions"; exit 1 }
+}
+foreach i {1 2 3 4 5 6 7 8 9} { sleep 0.4; send "\r" }
+expect {
+  -re {Apply this setup now} { sleep 0.4; send "\r" }
+  timeout { puts "\nWALK: FAIL no apply question after going back"; exit 1 }
 }
 set timeout 120
 expect {

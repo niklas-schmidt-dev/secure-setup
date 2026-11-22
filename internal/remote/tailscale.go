@@ -144,11 +144,22 @@ func InstallTailscale(ctx context.Context, c Host, f *Facts, onLine func(string)
 
 // UpOptions configure `tailscale up`.
 type UpOptions struct {
-	AuthKey  string
-	Hostname string
+	AuthKey     string
+	Hostname    string
+	Tags        []string // ACL tags to ask for, such as "tag:server"
+	LoginServer string   // control server to join instead of Tailscale's
 }
 
 var loginURLRe = regexp.MustCompile(`https://login\.tailscale\.com/\S+`)
+
+// loginURL finds the link a login without an auth key must be completed at:
+// on Tailscale's login server, or on the control server the node joins.
+func (o UpOptions) loginURL(line string) string {
+	if o.LoginServer == "" {
+		return loginURLRe.FindString(line)
+	}
+	return regexp.MustCompile(regexp.QuoteMeta(strings.TrimSuffix(o.LoginServer, "/")) + `/\S+`).FindString(line)
+}
 
 // TailscaleUp connects the node. Without an auth key it reports the login URL
 // through onURL and waits until the user has authenticated.
@@ -156,6 +167,12 @@ func TailscaleUp(ctx context.Context, c Host, o UpOptions, onLine func(string), 
 	args := []string{"tailscale", "up", "--timeout=15m"}
 	if o.Hostname != "" {
 		args = append(args, "--hostname="+sshx.Quote(o.Hostname))
+	}
+	if len(o.Tags) > 0 {
+		args = append(args, "--advertise-tags="+sshx.Quote(strings.Join(o.Tags, ",")))
+	}
+	if o.LoginServer != "" {
+		args = append(args, "--login-server="+sshx.Quote(o.LoginServer))
 	}
 	script := ""
 	if o.AuthKey != "" {
@@ -172,7 +189,7 @@ func TailscaleUp(ctx context.Context, c Host, o UpOptions, onLine func(string), 
 		if onLine != nil {
 			onLine(line)
 		}
-		if url := loginURLRe.FindString(line); url != "" && !seen {
+		if url := o.loginURL(line); url != "" && !seen {
 			seen = true
 			if onURL != nil {
 				onURL(url)

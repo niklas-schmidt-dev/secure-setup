@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/niklas-schmidt-dev/secure-setup/internal/localhost"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/plan"
@@ -249,8 +250,13 @@ func TestStepOrder(t *testing.T) {
 	if localSteps[1] != "Update the system" || localSteps[len(localSteps)-1] != "Reboot and check after the boot" {
 		t.Fatalf("local steps: %q", localSteps)
 	}
-	if !plan.Default().UpdateSystem || !plan.Default().Reboot {
-		t.Fatal("the system update and the reboot check are not on by default")
+	if !plan.Default().UpdateSystem || !plan.Default().Reboot || !plan.Default().AutoUpdates {
+		t.Fatal("the system update, automatic updates and the reboot check are not on by default")
+	}
+	// Automatic updates are set up right after the update, before the
+	// firewall can close anything.
+	if remoteSteps[2] != autoUpdatesStep || localSteps[2] != autoUpdatesStep {
+		t.Fatalf("automatic updates: remote %q, local %q", remoteSteps[2], localSteps[2])
 	}
 }
 
@@ -398,6 +404,188 @@ func TestBootCheck(t *testing.T) {
 	h.table = ""
 	if msg, err := BootCheck(context.Background(), h); err == nil || !strings.Contains(msg, "PROBLEMS: the firewall rules are not loaded") {
 		t.Fatalf("broken: %v %q", err, msg)
+	}
+}
+
+// yesPrompter answers every question with yes, like `--yes`, and counts them.
+type yesPrompter struct{ asked *int }
+
+func (p yesPrompter) ConfirmHostKey(context.Context, string, string, string) (bool, error) {
+	return true, nil
+}
+func (p yesPrompter) Confirm(context.Context, string, string) (bool, error) {
+	*p.asked++
+	return true, nil
+}
+func (p yesPrompter) Secret(context.Context, string, string) (string, error) { return "", nil }
+
+// With --yes the question "try again?" answers itself, so a run nobody
+// answers must stop when this computer is not on the tailnet, and it must do
+// so in the first step, before the server is touched.
+func TestUnattendedRunStopsWithoutLocalTailscale(t *testing.T) {
+	asked, ready := 0, false
+	p := plan.Default()
+	o := Options{Plan: &p, Prompt: yesPrompter{&asked}, Unattended: true,
+		LocalTailscaleReady: func(context.Context) (bool, string) { return ready, "Tailscale is stopped." }}
+	r := New(o)
+	err := r.connect(context.Background(), func(string) {})
+	if err == nil || !strings.Contains(err.Error(), "not on the tailnet") || asked != 0 || r.pub != nil {
+		t.Fatalf("err %v, asked %d times, connected %v", err, asked, r.pub != nil)
+	}
+	// Someone at the keyboard is asked, and the run goes on once it is up.
+	o.Unattended = false
+	o.LocalTailscaleReady = func(context.Context) (bool, string) { ready = asked >= 2; return ready, "Tailscale is stopped." }
+	if err := New(o).requireLocalTailscale(context.Background(), "x"); err != nil || asked != 2 {
+		t.Fatalf("err %v, asked %d times", err, asked)
+	}
+}
+
+// markerHost shows the rollback marker from the nth read on.
+type markerHost struct {
+	fakeHost
+	reads *int
+	from  int
+}
+
+func (h markerHost) Output(context.Context, string) (string, error) {
+	*h.reads++
+	if h.from > 0 && *h.reads >= h.from {
+		return "2026-01-01T00:00:00Z", nil
+	}
+	return "", nil
+}
+
+// A failed confirmation ends as soon as the server has rolled back, not after
+// a second full rollback window.
+func TestWaitForRollbackPolls(t *testing.T) {
+	defer func(d time.Duration) { rollbackPoll = d }(rollbackPoll)
+	rollbackPoll = time.Millisecond
+	p := plan.Default() // 120 s window
+	r := New(Options{Plan: &p})
+	r.appliedAt = time.Now()
+	reads := 0
+	start := time.Now()
+	err := r.waitForRollback(context.Background(), markerHost{reads: &reads, from: 3}, func(string) {}, errors.New("blocked"))
+	if err == nil || !strings.Contains(err.Error(), "rolled back to its previous rules at 2026-01-01T00:00:00Z") || reads != 3 || time.Since(start) > 5*time.Second {
+		t.Fatalf("err %v after %d reads and %s", err, reads, time.Since(start))
+	}
+	// No marker by the time the timer was long due: say so instead of waiting on.
+	r.appliedAt = time.Now().Add(-10 * time.Minute)
+	err = r.waitForRollback(context.Background(), markerHost{reads: &reads}, func(string) {}, errors.New("blocked"))
+	if err == nil || !strings.Contains(err.Error(), "left no marker") {
+		t.Fatalf("err %v", err)
+	}
+}
+
+// settleHost reports a pending rollback for the first reads and prints the
+// facts of a server whose earlier run has rolled back.
+type settleHost struct {
+	fakeHost
+	reads, detects *int
+	pending        int
+}
+
+func (h settleHost) Output(_ context.Context, cmd string) (string, error) {
+	if strings.Contains(cmd, "echo pending") {
+		*h.reads++
+		if *h.reads <= h.pending {
+			return "pending", nil
+		}
+	}
+	return "", nil
+}
+
+func (h settleHost) Script(_ context.Context, _ string, onLine func(string)) error {
+	*h.detects++
+	onLine("SS_TABLE=0")
+	onLine("ROLLED_BACK=2026-01-01T00:00:00Z")
+	return nil
+}
+
+// A run that finds the firewall of an earlier run still unconfirmed waits for
+// its rollback and reads the facts again, instead of staging over rules that
+// were never confirmed.
+func TestSettleEarlierRun(t *testing.T) {
+	defer func(d time.Duration) { settlePoll = d }(settlePoll)
+	settlePoll = time.Millisecond
+	p := plan.Default()
+	var events []Event
+	r := New(Options{Plan: &p, Report: func(e Event) { events = append(events, e) }})
+	reads, detects := 0, 0
+	h := settleHost{reads: &reads, detects: &detects, pending: 2}
+
+	settled := &remote.Facts{SecureSetupTable: true}
+	if f, err := r.settleEarlierRun(context.Background(), h, settled, func(string) {}); err != nil || f != settled || reads != 0 {
+		t.Fatalf("a settled server was waited for: %v, %d reads", err, reads)
+	}
+	f, err := r.settleEarlierRun(context.Background(), h, &remote.Facts{SecureSetupTable: true, RollbackArmed: true}, func(string) {})
+	if err != nil || reads != 3 || detects != 1 {
+		t.Fatalf("err %v, %d reads, %d detects", err, reads, detects)
+	}
+	if f.RollbackArmed || f.SecureSetupTable || f.RolledBack == "" {
+		t.Fatalf("the facts are not those after the rollback: %+v", f)
+	}
+	if len(events) != 1 || events[0].Kind != Attention {
+		t.Fatalf("the operator was not told about the wait: %+v", events)
+	}
+}
+
+// `secure-setup confirm` counts only in a session that arrived on the private
+// address over a connection opened after the rules went live. One that was
+// open before stays open under any rules (also when ssh shares it for a new
+// session, as ControlMaster does) and proves nothing.
+func TestCheckConfirm(t *testing.T) {
+	ap := netip.MustParseAddrPort
+	open := remote.ParseSessions("0 0 100.64.0.5:22 100.64.0.9:41000\n0 0 203.0.113.7:22 198.51.100.4:50000\n")
+	expect := formatConfirmExpect("100.64.0.5", open)
+	server := ap("100.64.0.5:22")
+	self := []netip.Addr{netip.MustParseAddr("203.0.113.7"), netip.MustParseAddr("100.64.0.5")}
+	if err := CheckConfirm(expect, ap("100.64.0.9:41001"), server, self); err != nil {
+		t.Fatalf("a new connection was refused: %v", err)
+	}
+	if err := CheckConfirm(expect, ap("100.64.0.9:41000"), server, self); err == nil || !strings.Contains(err.Error(), "already open") {
+		t.Fatalf("a connection from before the apply confirmed: %v", err)
+	}
+	if err := CheckConfirm(expect, ap("198.51.100.4:50001"), ap("203.0.113.7:22"), self); err == nil || !strings.Contains(err.Error(), "came in over 203.0.113.7, not 100.64.0.5") {
+		t.Fatalf("a session over the public address confirmed: %v", err)
+	}
+	if err := CheckConfirm("", ap("100.64.0.9:41001"), server, self); err == nil || !strings.Contains(err.Error(), "nothing to confirm") {
+		t.Fatalf("confirmed without a waiting run: %v", err)
+	}
+	// A login from this machine to its own private address goes over lo and
+	// never meets the rules.
+	for _, local := range []string{"100.64.0.5:50000", "203.0.113.7:50000", "127.0.0.1:50000"} {
+		if err := CheckConfirm(expect, ap(local), server, self); err == nil || !strings.Contains(err.Error(), "this machine itself") {
+			t.Fatalf("a session from this machine (%s) confirmed: %v", local, err)
+		}
+	}
+	if !openBefore(open, ap("100.64.0.9:41000")) || openBefore(open, ap("100.64.0.9:41001")) {
+		t.Fatal("openBefore does not match by peer address and port")
+	}
+}
+
+// The plan cannot know which port sshd listens on; staging refuses a public
+// port that is sshd's, before anything is written.
+func TestPublicPortsNeverOpenSSH(t *testing.T) {
+	p := plan.Default()
+	p.Server.Host, p.Firewall.WebPorts, p.Firewall.WANInterface = "203.0.113.10", nil, "eth0"
+	p.Firewall.PublicTCPPorts = []int{2222}
+	r := New(Options{Plan: &p})
+	r.facts = &remote.Facts{SSHPort: 2222, NFT: true, PkgMgr: "apt-get"}
+	var scripts []string
+	err := r.stageFirewallOn(context.Background(), scriptHost{scripts: &scripts}, func(string) {})
+	if err == nil || !strings.Contains(err.Error(), "open SSH to the internet again") || len(scripts) != 0 {
+		t.Fatalf("err %v, scripts %q", err, scripts)
+	}
+	// sshd may listen on more than one port; none of them is opened.
+	r.facts.SSHPort, r.facts.SSHPorts = 22, []int{22, 2222}
+	if err := r.stageFirewallOn(context.Background(), scriptHost{scripts: &scripts}, func(string) {}); err == nil || len(scripts) != 0 {
+		t.Fatalf("a second sshd port was opened to everyone: %v", err)
+	}
+	r.facts.SSHPorts = []int{22}
+	p.Firewall.TailnetPorts = []int{22}
+	if err := r.stageFirewallOn(context.Background(), scriptHost{scripts: &scripts}, func(string) {}); err != nil || len(scripts) == 0 {
+		t.Fatalf("a public port that is not sshd's: %v", err)
 	}
 }
 

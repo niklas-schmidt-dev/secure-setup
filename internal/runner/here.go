@@ -24,6 +24,51 @@ const (
 	ConfirmedPath     = remote.StateDir + "/confirmed"      // written by `secure-setup confirm`
 )
 
+// formatConfirmExpect is what a waiting run leaves for `secure-setup confirm`:
+// the address a confirming session must arrive on, then the peers of the
+// connections that were open before or while the rules went live.
+func formatConfirmExpect(admin string, before []remote.Session) string {
+	var b strings.Builder
+	b.WriteString(admin + "\n")
+	for _, s := range before {
+		b.WriteString(s.Peer.String() + "\n")
+	}
+	return b.String()
+}
+
+// localPeer reports whether a connection from peer started on this machine.
+func localPeer(peer, admin netip.Addr, self []netip.Addr) bool {
+	return peer.IsLoopback() || peer == admin || slices.Contains(self, peer)
+}
+
+func openBefore(before []remote.Session, peer netip.AddrPort) bool {
+	return slices.ContainsFunc(before, func(s remote.Session) bool { return s.Peer == peer })
+}
+
+// CheckConfirm decides whether the SSH session `secure-setup confirm` runs in
+// shows that the new rules let its user in. expect is the content of
+// ConfirmExpectPath. The session must have arrived on the private address,
+// from another machine (self lists this one's addresses; a login from here
+// reaches the private address over lo, past the rules), over a connection
+// that was not open yet when the rules went live: an older one stays open
+// under any rules and proves nothing.
+func CheckConfirm(expect string, client, server netip.AddrPort, self []netip.Addr) error {
+	lines := strings.Fields(expect)
+	if len(lines) == 0 {
+		return errors.New("nothing to confirm: no `secure-setup here` run is waiting on this machine")
+	}
+	if server.Addr().String() != lines[0] {
+		return fmt.Errorf("this session came in over %s, not %s; log in over the tailnet address and run it there", server.Addr(), lines[0])
+	}
+	if localPeer(client.Addr(), server.Addr(), self) {
+		return fmt.Errorf("this session comes from this machine itself (%s), so it did not pass the new rules; log in from another device on the tailnet and run it there", client.Addr())
+	}
+	if slices.Contains(lines[1:], client.String()) {
+		return fmt.Errorf("this connection (from %s) was already open when the new rules went live, so it does not show that they let you in. Open a new SSH connection to %s and run `secure-setup confirm` there (with shared connections: ssh -o ControlPath=none)", client, lines[0])
+	}
+	return nil
+}
+
 // localSteps is the step list for `secure-setup here`: the same work as over
 // SSH, but the confirmation comes from a new login or from self-checks.
 func (r *Runner) localSteps() []step {
@@ -38,6 +83,7 @@ func (r *Runner) localSteps() []step {
 	return []step{
 		{name: "Look around on this machine", run: r.hereDetect},
 		{name: "Update the system", skip: r.skipUpdate, run: r.updateSystem},
+		{name: autoUpdatesStep, skip: r.skipAutoUpdates, run: r.autoUpdates},
 		{name: "Install Tailscale", skip: func() string {
 			if ts.UseExisting {
 				return "using the existing private network " + ts.AdminAddress
@@ -85,6 +131,9 @@ func (r *Runner) hereDetect(ctx context.Context, log func(string)) error {
 	if err != nil {
 		return err
 	}
+	if f, err = r.settleEarlierRun(ctx, r.local, f, log); err != nil {
+		return err
+	}
 	r.facts = f
 	r.result.Facts = f
 	if r.local.Sudo {
@@ -103,7 +152,10 @@ func (r *Runner) hereDetect(ctx context.Context, log func(string)) error {
 	if err := resolveWAN(ctx, r.local, p, f, log); err != nil {
 		return err
 	}
-	r.result.PublicAddress = f.WANIPv4
+	// A server without IPv4 has its IPv6 address as the public one.
+	if r.result.PublicAddress = f.WANIPv4; f.WANIPv4 == "" {
+		r.result.PublicAddress = f.WANIPv6
+	}
 	r.result.SSHPort = f.SSHPort
 	if !containsInt(p.Firewall.TailnetPorts, f.SSHPort) {
 		p.Firewall.TailnetPorts = append(p.Firewall.TailnetPorts, f.SSHPort)
@@ -135,12 +187,12 @@ func (r *Runner) hereDetect(ctx context.Context, log func(string)) error {
 	case !server.IsValid():
 		log("no SSH session detected (console, cloud-init, or sudo without SSH_CONNECTION)")
 	default:
-		iface, _ := r.local.Output(ctx, "ip -o addr show to "+server.String()+" 2>/dev/null | awk '{print $2; exit}'")
+		iface, _ := r.local.Output(ctx, "ip -o addr show to "+server.Addr().String()+" 2>/dev/null | awk '{print $2; exit}'")
 		where := "over " + orUnknown(iface)
 		if iface == p.Firewall.WANInterface {
 			where += " (the public interface)"
 		}
-		log(fmt.Sprintf("this SSH session: %s -> %s %s; it stays open while the firewall changes", client, server, where))
+		log(fmt.Sprintf("this SSH session: %s -> %s %s; it stays open while the firewall changes", client.Addr(), server.Addr(), where))
 	}
 
 	// Key-only sshd is safe only when a key can still log in.
@@ -281,13 +333,10 @@ func (r *Runner) hereHardenSSH(ctx context.Context, log func(string)) error {
 }
 
 func (r *Runner) hereApplyFirewall(ctx context.Context, log func(string)) error {
-	if err := r.local.WriteFile(ctx, ConfirmExpectPath, []byte(r.result.AdminAddress+"\n"), "0600"); err != nil {
+	if _, err := r.local.Output(ctx, "rm -f "+ConfirmedPath+" "+ConfirmExpectPath); err != nil {
 		return err
 	}
-	if _, err := r.local.Output(ctx, "rm -f "+ConfirmedPath); err != nil {
-		return err
-	}
-	before, err := remote.Sessions(ctx, r.local, r.facts.SSHPort)
+	before, err := remote.Sessions(ctx, r.local, r.facts.AllSSHPorts()...)
 	if err != nil {
 		return err
 	}
@@ -296,11 +345,16 @@ func (r *Runner) hereApplyFirewall(ctx context.Context, log func(string)) error 
 	}
 	// A login counts only from here on, over a connection the new rules let
 	// in: one that was open before or while they went live came in earlier.
-	live, err := remote.Sessions(ctx, r.local, r.facts.SSHPort)
+	live, err := remote.Sessions(ctx, r.local, r.facts.AllSSHPorts()...)
 	if err != nil {
 		return err
 	}
 	r.before = append(before, live...)
+	// From here on `secure-setup confirm` has something to confirm, and knows
+	// which connections say nothing about the new rules.
+	if err := r.local.WriteFile(ctx, ConfirmExpectPath, []byte(formatConfirmExpect(r.result.AdminAddress, r.before)), "0600"); err != nil {
+		return err
+	}
 	epoch, err := r.local.Output(ctx, "date +%s")
 	if err != nil {
 		return err
@@ -345,9 +399,17 @@ func (r *Runner) confirmByLogin(ctx context.Context, log func(string)) error {
 			return r.rolledBackError(at, errors.New("the rollback fired before a login arrived"))
 		}
 		if by, _ := r.local.Output(ctx, "cat "+ConfirmedPath+" 2>/dev/null || true"); by != "" {
-			r.result.ConfirmedBy = "`secure-setup confirm` from " + by
-			log("confirmed by `secure-setup confirm` in a session from " + by)
-			return r.keepFirewall(ctx, log)
+			// `secure-setup confirm` refuses a connection from before the
+			// apply itself; a marker that got here anyway does not count.
+			peer, err := netip.ParseAddrPort(by)
+			if err != nil || openBefore(r.before, peer) || localPeer(peer.Addr(), adminAddr, self) {
+				_, _ = r.local.Output(ctx, "rm -f "+ConfirmedPath)
+				log("ignored a `secure-setup confirm` from " + by + ": that connection was open before the rules went live, or comes from this machine")
+			} else {
+				r.result.ConfirmedBy = "`secure-setup confirm` from " + peer.Addr().String()
+				log("confirmed by `secure-setup confirm` in a session from " + peer.Addr().String())
+				return r.keepFirewall(ctx, log)
+			}
 		}
 		// Only connections that came in through the admin rule count (its
 		// counter is above zero). A TCP connection alone proves nothing: sshd
@@ -359,7 +421,7 @@ func (r *Runner) confirmByLogin(ctx context.Context, log func(string)) error {
 			if !arrived {
 				arrived = true
 				from := ""
-				if now, err := remote.Sessions(ctx, r.local, r.facts.SSHPort); err == nil {
+				if now, err := remote.Sessions(ctx, r.local, r.facts.AllSSHPorts()...); err == nil {
 					if fresh := remote.NewSessionsTo(r.before, now, adminAddr, self...); len(fresh) > 0 {
 						from = " from " + fresh[0].Peer.Addr().String()
 					}
@@ -374,7 +436,8 @@ func (r *Runner) confirmByLogin(ctx context.Context, log func(string)) error {
 		}
 		left := time.Until(deadline)
 		if left <= 0 {
-			return r.waitForLocalRollback(ctx, log, errors.New("no login over the private network arrived in time"))
+			r.attention("no login arrived; waiting for this machine to restore its previous firewall")
+			return r.waitForRollback(ctx, r.local, log, errors.New("no login over the private network arrived in time"))
 		}
 		if time.Since(lastNote) >= 15*time.Second {
 			log(fmt.Sprintf("waiting for a login to %s:%d ... %ds left", addr, r.facts.SSHPort, int(left.Seconds())))
@@ -530,27 +593,6 @@ func (r *Runner) keepFirewall(ctx context.Context, log func(string)) error {
 	}
 	_, _ = r.local.Output(ctx, "rm -f "+ConfirmExpectPath+" "+ConfirmedPath)
 	return nil
-}
-
-func (r *Runner) waitForLocalRollback(ctx context.Context, log func(string), cause error) error {
-	r.attention("no login arrived; waiting for this machine to restore its previous firewall")
-	log("reason: " + shortErr(cause))
-	deadline := time.Now().Add(25 * time.Second)
-	for {
-		if at := r.rollbackMarker(ctx, r.local); at != "" {
-			log("the previous firewall state is active again")
-			return r.rolledBackError(at, cause)
-		}
-		if time.Now().After(deadline) {
-			log("warning: the rollback marker was not found; check `nft list ruleset`")
-			return fmt.Errorf("the new firewall was not confirmed; the rollback should have fired but left no marker: %w", cause)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
 }
 
 func (r *Runner) hereVerify(ctx context.Context, log func(string)) error {

@@ -62,10 +62,12 @@ type Facts struct {
 	Systemd    bool
 	NFT        bool
 	SSHPort    int
+	SSHPorts   []int // every port sshd listens on (Port and ListenAddress), SSHPort first
 	WANIface   string
 	WANIfaces  []string // every device with a default route (IPv4 and IPv6), WANIface first
 	PublicNICs []string // network cards with a public address, with or without a default route
 	WANIPv4    string   // first IPv4 address on WANIface, when known
+	WANIPv6    string   // first global IPv6 address on the IPv6 default-route interface, when known
 	Docker     bool
 
 	Tailscale      bool   // CLI installed
@@ -77,7 +79,7 @@ type Facts struct {
 	FirewalldEnabled bool   // enabled at boot, even if not running now
 	SecureSetupTable bool   // our nftables table is already loaded
 	RolledBack       string // timestamp of a previous rollback, if any
-	RollbackArmed    bool   // a rollback timer from an earlier run is still active
+	RollbackArmed    bool   // an earlier run's firewall still awaits its confirmation or its rollback
 
 	aptUpdated bool
 }
@@ -98,11 +100,14 @@ if command -v tailscale >/dev/null 2>&1; then echo TAILSCALE=1; else echo TAILSC
 if command -v docker >/dev/null 2>&1; then echo DOCKER=1; else echo DOCKER=0; fi
 sshd_bin=$(command -v sshd || echo /usr/sbin/sshd)
 printf 'SSHPORT=%s\n' "$("$sshd_bin" -T 2>/dev/null | awk '$1=="port"{print $2; exit}')"
+printf 'SSHPORTS=%s\n' "$("$sshd_bin" -T 2>/dev/null | awk '$1=="port"{printf "%s ", $2} $1=="listenaddress"{n=split($2,a,":"); printf "%s ", a[n]}')"
 printf 'WAN=%s\n' "$(ip -o -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
 printf 'WAN6=%s\n' "$(ip -o -6 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
 printf 'WANS=%s\n' "$({ ip -o -4 route show default; ip -o -6 route show default; } 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); break}}' | tr '\n' ' ')"
 wan=$(ip -o -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
 if [ -n "$wan" ]; then printf 'WANIP=%s\n' "$(ip -o -4 addr show dev "$wan" 2>/dev/null | awk '{print $4; exit}' | cut -d/ -f1)"; fi
+wan6=$(ip -o -6 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+if [ -n "$wan6" ]; then printf 'WANIP6=%s\n' "$(ip -o -6 addr show dev "$wan6" scope global 2>/dev/null | awk '{print $4; exit}' | cut -d/ -f1)"; fi
 sysnet=/sys/class/net
 ` + onCardScript + `printf 'NICADDRS=%s\n' "$(ip -o addr show scope global 2>/dev/null | while read -r _ dev _ addr _; do dev=${dev%%@*}; if oncard "$dev" 0; then printf '%s %s ' "$dev" "$addr"; fi; done)"
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then echo UFW=1; else echo UFW=0; fi
@@ -110,7 +115,7 @@ if systemctl is-active --quiet firewalld 2>/dev/null; then echo FIREWALLD=1; els
 if systemctl is-enabled --quiet firewalld 2>/dev/null; then echo FIREWALLD_ENABLED=1; else echo FIREWALLD_ENABLED=0; fi
 if command -v nft >/dev/null 2>&1 && nft list table inet secure_setup >/dev/null 2>&1; then echo SS_TABLE=1; else echo SS_TABLE=0; fi
 if [ -f /var/lib/secure-setup/rolled-back ]; then printf 'ROLLED_BACK=%s\n' "$(cat /var/lib/secure-setup/rolled-back)"; fi
-if systemctl is-active --quiet secure-setup-rollback.timer 2>/dev/null; then echo ROLLBACK_ARMED=1; fi
+if ` + rollbackPendingTest + `; then echo ROLLBACK_ARMED=1; fi
 `
 
 // onCardScript defines `oncard DEV DEPTH`: true when DEV is a network card
@@ -129,7 +134,7 @@ const onCardScript = `oncard() {
 
 // detectKeys are the facts detectScript prints. Other lines are ignored, so
 // a server cannot fill the map with keys of its own.
-var detectKeys = []string{"ID", "ID_LIKE", "CODENAME", "PRETTY", "HOSTNAME", "SYSTEMD", "PKG", "NFT", "TAILSCALE", "DOCKER", "SSHPORT", "WAN", "WAN6", "WANS", "WANIP", "NICADDRS", "UFW", "FIREWALLD", "FIREWALLD_ENABLED", "SS_TABLE", "ROLLED_BACK", "ROLLBACK_ARMED"}
+var detectKeys = []string{"ID", "ID_LIKE", "CODENAME", "PRETTY", "HOSTNAME", "SYSTEMD", "PKG", "NFT", "TAILSCALE", "DOCKER", "SSHPORT", "SSHPORTS", "WAN", "WAN6", "WANS", "WANIP", "WANIP6", "NICADDRS", "UFW", "FIREWALLD", "FIREWALLD_ENABLED", "SS_TABLE", "ROLLED_BACK", "ROLLBACK_ARMED"}
 
 // Detect gathers Facts about the server. Their text is shown in the wizard's
 // forms, so control characters are replaced (see Printable).
@@ -162,6 +167,7 @@ func Detect(ctx context.Context, c Host) (*Facts, error) {
 		RollbackArmed:    kv["ROLLBACK_ARMED"] == "1",
 		WANIface:         kv["WAN"],
 		WANIPv4:          kv["WANIP"],
+		WANIPv6:          kv["WANIP6"],
 	}
 	if f.WANIface == "" {
 		f.WANIface = kv["WAN6"]
@@ -179,6 +185,12 @@ func Detect(ctx context.Context, c Host) (*Facts, error) {
 	if f.SSHPort == 0 {
 		f.SSHPort = 22
 	}
+	f.SSHPorts = []int{f.SSHPort}
+	for _, s := range strings.Fields(kv["SSHPORTS"]) {
+		if n, err := strconv.Atoi(s); err == nil && !slices.Contains(f.SSHPorts, n) {
+			f.SSHPorts = append(f.SSHPorts, n)
+		}
+	}
 	if f.Tailscale {
 		if st, err := TailscaleStatus(ctx, c); err == nil {
 			f.TailscaleState = Printable(st.BackendState)
@@ -191,6 +203,14 @@ func Detect(ctx context.Context, c Host) (*Facts, error) {
 		}
 	}
 	return f, nil
+}
+
+// AllSSHPorts lists every port sshd listens on, at least SSHPort.
+func (f *Facts) AllSSHPorts() []int {
+	if len(f.SSHPorts) == 0 {
+		return []int{f.SSHPort}
+	}
+	return f.SSHPorts
 }
 
 // publicNICs picks the network cards that carry a public address from pairs

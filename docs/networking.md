@@ -61,11 +61,12 @@ the explicit network allowances listed below.
 ## The default firewall policy
 
 - inbound default: drop
-- loopback, established and related connections, the ICMP types networks need, DHCP replies: accept
+- loopback, established and related connections, the ICMP types networks need, DHCP and DHCPv6 replies: accept
 - ping: accept with a rate limit (optional)
 - UDP 41641 from anywhere: accept (direct Tailscale connections; authenticated WireGuard)
 - SSH and any extra ports you chose, only on `tailscale0`: accept (with a counter: `nft list chain inet secure_setup input` shows how many connections came in this way). With an [existing private network](#existing-private-networks), only to its `admin_address` on its interface
 - TCP 443 (and 80 if chosen), only from Cloudflare's ranges: accept
+- ports a plan lists in `public_tcp_ports` or `public_udp_ports`, from anywhere: accept (none by default; see [the reference](reference.md#ports-open-to-everyone))
 - forwarded traffic (Docker, VMs): allowed from inside, allowed from the internet only through Cloudflare on the web ports. "The internet" is every interface with a default route, IPv4 or IPv6, every network card with a public address, such as a second public NIC without a default route, a VLAN, bond or bridge on top of such a card, and every interface the plan lists in `extra_wan_interfaces`; traffic arriving on anything else (Docker and VM bridges, VPN and tunnel devices, private networks) counts as inside
 - outbound: allowed
 
@@ -99,6 +100,11 @@ goes into the plan's `firewall` object:
 Forwarded traffic from it is then filtered like the internet. Each listed
 interface must exist on the server.
 
+## Tags and Headscale
+
+A plan can ask for ACL tags when the server joins, and can join a control
+server of your own instead of Tailscale's. See [the reference](reference.md#tags-and-a-control-server-of-your-own).
+
 ## Tailscale SSH
 
 Tailscale SSH is optional. It uses your tailnet identity instead of a local
@@ -127,11 +133,45 @@ public address, SSH to the public address stays blocked, and when the
 interface faces the internet, forwarded traffic arriving on it is filtered
 like the internet.
 
+## IPv6-only servers
+
+A server needs no public IPv4 address for this setup: SSH arrives over the
+tailnet, and a Cloudflare Tunnel connects outwards. Without the address you
+save what your provider charges for it. Detection takes the interface of
+the IPv6 default route as the internet interface, and the ruleset lets
+DHCPv6 replies and router advertisements in, so the server keeps its
+address.
+
+Set the server up **from your computer**: give the wizard, or `apply --host`,
+its IPv6 address. Your computer runs secure-setup and needs IPv6 itself.
+The server only downloads from hosts that have IPv6 (your distribution's
+mirrors, Tailscale, Cloudflare).
+
+`secure-setup here` works as well, but the installer cannot fetch the
+binary on the server: GitHub's release downloads have no IPv6 address, and
+the installer says so. Copy the binary over instead. On your computer,
+download the Linux archive for the server's architecture from
+[GitHub Releases](https://github.com/niklas-schmidt-dev/secure-setup/releases),
+check it as described in [installation details](../README.md#installation-details), then:
+
+```sh
+tar -xzf secure-setup_linux_amd64.tar.gz secure-setup
+scp secure-setup 'root@[2001:db8::10]:/usr/local/bin/secure-setup'
+ssh root@2001:db8::10 secure-setup here
+```
+
+Replace the address. For web traffic choose the tunnel, or keep in mind
+that Cloudflare then reaches your origin over IPv6 only. The remote setup
+is tested end to end over IPv6 addresses; a server without any IPv4 route
+is not part of the test environment.
+
 ## Existing connections and service reloads
 
 Your existing public SSH session can survive the firewall change because
-conntrack treats it as an established flow. A new connection to the public
-SSH port is what must be blocked, and that is what remote setup tests.
+conntrack treats it as an established flow: setup switches connection
+tracking on before the rules load, so the session is known by then. A new
+connection to the public SSH port is what must be blocked, and that is what
+remote setup tests.
 
 On Debian, stopping `nftables.service` flushes the ruleset. To reload the
 persisted policy on a live server, use:

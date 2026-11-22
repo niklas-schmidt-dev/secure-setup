@@ -17,11 +17,17 @@ type Session struct {
 	Local, Peer netip.AddrPort
 }
 
-// Sessions lists established connections to the given local TCP port.
-func Sessions(ctx context.Context, c Host, port int) ([]Session, error) {
-	out, err := c.Output(ctx, fmt.Sprintf("ss -Htn state established '( sport = :%d )' 2>/dev/null || true", port))
+// Sessions lists established connections to the given local TCP ports. A
+// failing ss is an error, never an empty list: the list says which
+// connections were open before the rules changed.
+func Sessions(ctx context.Context, c Host, ports ...int) ([]Session, error) {
+	filter := make([]string, len(ports))
+	for i, p := range ports {
+		filter[i] = fmt.Sprintf("sport = :%d", p)
+	}
+	out, err := c.Output(ctx, "ss -Htn state established '( "+strings.Join(filter, " or ")+" )'")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list the open SSH connections: %w", err)
 	}
 	return ParseSessions(out), nil
 }

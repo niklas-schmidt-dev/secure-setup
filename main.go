@@ -5,11 +5,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -56,6 +59,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdRender(args[1:])
 	case "boot-check":
 		return cmdBootCheck(ctx)
+	case "status":
+		return cmdStatus(ctx, args[1:])
 	case "undo":
 		return cmdUndo(ctx, args[1:])
 	case "version", "--version", "-v":
@@ -75,6 +80,8 @@ func usage() {
 From your computer:
   secure-setup                      guided setup of a server over SSH (TUI)
   secure-setup apply -f plan.json   run a saved plan without the wizard
+                                    (--host ADDR: the same plan for another server)
+  secure-setup status --host ADDR   show the lockdown of a server and what is wrong with it
   secure-setup undo --host ADDR     remove the firewall, timers and sshd change again
 
 On the server itself:
@@ -82,7 +89,11 @@ On the server itself:
   secure-setup here --yes           no questions: defaults, confirmed by self-checks
   secure-setup here -f plan.json    run a saved plan on this machine
   secure-setup confirm              in a new tailnet session: confirm a waiting setup
+  secure-setup status --here        show the lockdown of this machine (--json for scripts)
   secure-setup undo --here          remove it from this machine again
+
+status and undo also take -f plan.json instead of --host: the address, port,
+user and key come from the plan.
 
   secure-setup render -f plan.json  print the nftables ruleset a plan produces
 
@@ -104,17 +115,22 @@ func cmdHere(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	p := plan.Default()
+	interactive := term.IsTerminal(int(os.Stdin.Fd())) && !*yes
+	p, loadedFrom := plan.Default(), ""
 	if *file != "" {
 		if p, err = plan.Load(*file); err != nil {
 			return err
+		}
+	} else if interactive && !*noTUI {
+		// The wizard starts from the answers of the last run on this machine.
+		if saved, err := plan.Load(plan.LocalSavePath); err == nil && saved.Local {
+			p, loadedFrom = saved, plan.LocalSavePath
 		}
 	}
 	p.Local = true
 	p.Server.User = localhost.LoginUser()
 	p.Tailscale.AuthKey = os.Getenv("TS_AUTHKEY")
 	p.Firewall.TunnelToken = os.Getenv("CLOUDFLARE_TUNNEL_TOKEN")
-	interactive := term.IsTerminal(int(os.Stdin.Fd())) && !*yes
 	switch {
 	case *confirm != "":
 		p.Firewall.ConfirmBy = *confirm
@@ -128,7 +144,7 @@ func cmdHere(ctx context.Context, args []string) error {
 		return err
 	}
 	if interactive && !*noTUI {
-		return tui.RunHere(ctx, &p, version, host)
+		return tui.RunHere(ctx, &p, version, host, loadedFrom)
 	}
 	return runHereText(ctx, &p, host, *yes || !interactive)
 }
@@ -148,20 +164,47 @@ func runHereText(ctx context.Context, p *plan.Plan, host *localhost.Host, yes bo
 		fmt.Print(describe(p))
 	}
 	opts := runner.Options{Plan: p, Prompt: prompt, Local: host, Unattended: yes}
-	opts.Report = textui.Reporter(os.Stdout, runner.New(opts).Steps())
+	log := reportWithLog(&opts, "this-machine")
+	defer log.Close()
 	res, err := runner.New(opts).Run(ctx)
+	return finish(log, "This machine is locked down.", p, res, err)
+}
+
+// reportWithLog makes a run print its events and write them to its log file.
+func reportWithLog(opts *runner.Options, name string) *textui.Transcript {
+	steps := runner.New(*opts).Steps()
+	log := textui.OpenTranscript(name, steps)
+	show := textui.Reporter(os.Stdout, steps)
+	opts.Report = func(e runner.Event) {
+		show(e)
+		log.Event(e)
+	}
+	return log
+}
+
+// finish prints how a run ended and where its log is.
+func finish(log *textui.Transcript, done string, p *plan.Plan, res *runner.Result, err error) error {
 	if err != nil {
+		if log.Path != "" {
+			fmt.Fprintln(os.Stderr, "log of this run:", log.Path)
+		}
 		return err
 	}
+	summary := tui.Summary(p, res)
+	log.Note(done + "\n" + summary)
 	fmt.Println()
-	fmt.Println("This machine is locked down.")
+	fmt.Println(done)
 	fmt.Println()
-	fmt.Print(tui.Summary(p, res))
+	fmt.Print(summary)
+	if log.Path != "" {
+		fmt.Printf("%-24s %s\n", "Log of this run", log.Path)
+	}
 	return nil
 }
 
 // cmdConfirm runs in a fresh SSH session on the server while `here` waits
-// for a login. It checks that the session arrived over the private address.
+// for a login. It checks that the session arrived over the private address,
+// on a connection opened after the rules went live.
 func cmdConfirm(ctx context.Context) error {
 	host, err := localhost.New(ctx)
 	if err != nil {
@@ -171,23 +214,20 @@ func cmdConfirm(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if expect == "" {
-		return errors.New("nothing to confirm: no `secure-setup here` run is waiting on this machine")
-	}
 	client, server := localhost.SSHSession()
-	if !server.IsValid() {
+	if expect != "" && !server.IsValid() {
 		if os.Getenv("SUDO_USER") != "" {
 			return errors.New("sudo dropped SSH_CONNECTION; run it as: sudo --preserve-env=SSH_CONNECTION secure-setup confirm")
 		}
 		return errors.New("this is not an SSH session; run `secure-setup confirm` in a new SSH login over the tailnet")
 	}
-	if server.String() != expect {
-		return fmt.Errorf("this session came in over %s, not %s; log in over the tailnet address and run it there", server, expect)
+	if err := runner.CheckConfirm(expect, client, server, remote.LocalAddrs(ctx, host)); err != nil {
+		return err
 	}
 	if err := host.WriteFile(ctx, runner.ConfirmedPath, []byte(client.String()+"\n"), "0600"); err != nil {
 		return err
 	}
-	fmt.Printf("confirmed: this session arrived over %s from %s; the setup keeps the new rules\n", server, client)
+	fmt.Printf("confirmed: this session arrived over %s from %s; the setup keeps the new rules\n", server.Addr(), client.Addr())
 	return nil
 }
 
@@ -195,24 +235,36 @@ func cmdApply(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	file := fs.String("f", "", "plan file (JSON); the wizard saves one in ~/.config/secure-setup/")
 	yes := fs.Bool("yes", false, "do not ask: accept the plan and first-seen host keys")
+	host := fs.String("host", "", "server address to use instead of the plan's: one plan for several servers")
+	hostKey := fs.String("host-key", "", "fingerprint the server's host key must have (SHA256:..., as ssh-keygen -lf prints it), instead of trusting the first key seen")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *file == "" {
 		return errors.New("apply needs -f plan.json")
 	}
-	p, err := plan.Load(*file)
+	// Validated below, once the flags and the environment are filled in.
+	p, err := plan.Read(*file)
 	if err != nil {
 		return err
+	}
+	if *host != "" {
+		if p.Local {
+			return errors.New("--host does not go with a plan for this machine (\"local\": true)")
+		}
+		p.Server.Host = *host
+	}
+	if *hostKey != "" {
+		p.Server.HostKey = *hostKey
 	}
 	p.Server.Password = os.Getenv("SECURE_SETUP_PASSWORD")
 	p.Server.Passphrase = os.Getenv("SECURE_SETUP_PASSPHRASE")
 	p.Tailscale.AuthKey = os.Getenv("TS_AUTHKEY")
 	p.Firewall.TunnelToken = os.Getenv("CLOUDFLARE_TUNNEL_TOKEN")
-	// Again with the secrets from the environment: it takes the tunnel token
-	// out of a pasted install command.
+	// With the secrets from the environment: it takes the tunnel token out of
+	// a pasted install command.
 	if err := p.Validate(); err != nil {
-		return err
+		return fmt.Errorf("%s: %w", *file, err)
 	}
 	if p.Local {
 		host, err := localhost.New(ctx)
@@ -237,18 +289,11 @@ func cmdApply(ctx context.Context, args []string) error {
 			return errors.New("not confirmed")
 		}
 	}
-	opts := runner.Options{Plan: &p, Prompt: prompt}
-	opts.Report = textui.Reporter(os.Stdout, runner.New(opts).Steps())
-	r := runner.New(opts)
-	res, err := r.Run(ctx)
-	if err != nil {
-		return err
-	}
-	fmt.Println()
-	fmt.Println("The server is locked down.")
-	fmt.Println()
-	fmt.Print(tui.Summary(&p, res))
-	return nil
+	opts := runner.Options{Plan: &p, Prompt: prompt, Unattended: *yes}
+	log := reportWithLog(&opts, p.Server.Host)
+	defer log.Close()
+	res, err := runner.New(opts).Run(ctx)
+	return finish(log, "The server is locked down.", &p, res, err)
 }
 
 func describe(p *plan.Plan) string {
@@ -257,11 +302,20 @@ func describe(p *plan.Plan) string {
 		fmt.Fprintf(&b, "  server          this machine\n")
 	} else {
 		fmt.Fprintf(&b, "  server          %s as %s\n", p.Address(), p.Server.User)
+		if p.Server.HostKey != "" {
+			fmt.Fprintf(&b, "  host key        must be %s\n", p.Server.HostKey)
+		}
 	}
 	if p.Tailscale.UseExisting {
 		fmt.Fprintf(&b, "  admin network   existing, %s on %s\n", p.Tailscale.AdminAddress, p.Tailscale.AdminInterface)
 	} else {
 		fmt.Fprintf(&b, "  tailscale       install and join (hostname %q)\n", p.Tailscale.Hostname)
+		if len(p.Tailscale.Tags) > 0 {
+			fmt.Fprintf(&b, "  tailscale tags  %s\n", strings.Join(p.Tailscale.Tags, ", "))
+		}
+		if p.Tailscale.LoginServer != "" {
+			fmt.Fprintf(&b, "  login server    %s\n", p.Tailscale.LoginServer)
+		}
 	}
 	fmt.Fprintf(&b, "  tailnet ports   TCP %s\n", plan.FormatPorts(p.Firewall.TailnetPorts))
 	if p.Firewall.CloudflareTunnel {
@@ -269,9 +323,13 @@ func describe(p *plan.Plan) string {
 	} else {
 		fmt.Fprintf(&b, "  web ports       TCP %s from Cloudflare\n", orNone(plan.FormatPorts(p.Firewall.WebPorts)))
 	}
+	if public := plan.PublicPorts(p.Firewall); public != "" {
+		fmt.Fprintf(&b, "  public ports    %s, open to the whole internet\n", public)
+	}
 	fmt.Fprintf(&b, "  ping            %v\n", p.Firewall.AllowPing)
 	fmt.Fprintf(&b, "  sshd keys only  %v\n", p.SSH.Harden)
 	fmt.Fprintf(&b, "  system update   %v\n", p.UpdateSystem)
+	fmt.Fprintf(&b, "  auto updates    %v\n", p.AutoUpdates)
 	fmt.Fprintf(&b, "  reboot + check  %v\n", p.Reboot)
 	fmt.Fprintf(&b, "  rollback        %ds\n", p.Firewall.RollbackSeconds)
 	if p.Firewall.WANInterface != "" {
@@ -318,6 +376,8 @@ func cmdRender(args []string) error {
 		TailnetTCPPorts:  p.Firewall.TailnetPorts,
 		TailnetAll:       p.Firewall.TailnetAll,
 		WebPorts:         p.Firewall.WebPorts,
+		PublicTCPPorts:   p.Firewall.PublicTCPPorts,
+		PublicUDPPorts:   p.Firewall.PublicUDPPorts,
 		AllowPing:        p.Firewall.AllowPing,
 		TailscaleUDPPort: p.Tailscale.UDPPort,
 	})
@@ -334,6 +394,7 @@ systemctl stop secure-setup-rollback.timer >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/secure-setup-cloudflare-sync.timer /etc/systemd/system/secure-setup-cloudflare-sync.service /usr/local/sbin/secure-setup-cloudflare-sync
 systemctl daemon-reload
 if nft list table inet secure_setup >/dev/null 2>&1; then nft delete table inet secure_setup; echo "firewall table removed: all inbound traffic is allowed again"; fi
+nft delete table inet ` + remote.TrackTable + ` 2>/dev/null || true
 if [ -f /etc/nftables.conf.secure-setup.bak ]; then
 	mv -f /etc/nftables.conf.secure-setup.bak /etc/nftables.conf
 	echo "restored the previous /etc/nftables.conf"
@@ -363,7 +424,7 @@ if [ -f /etc/systemd/system/secure-setup-cloudflared.service ]; then
 	echo "Cloudflare Tunnel service removed (cloudflared stays installed; delete the tunnel in the Cloudflare dashboard if you no longer need it)"
 fi
 rm -f /etc/systemd/system/secure-setup-bootcheck.service /etc/motd.d/secure-setup
-rm -rf /etc/secure-setup /var/lib/secure-setup
+` + remote.UndoAutoUpdatesScript + `rm -rf /etc/secure-setup /var/lib/secure-setup
 if [ -f /etc/ssh/sshd_config.d/00-secure-setup.conf ] || grep -q '^# secure-setup: added the next line$' /etc/ssh/sshd_config 2>/dev/null; then
 ` + remote.RevertSSHDScript + `	echo "sshd hardening removed"
 fi
@@ -386,27 +447,151 @@ func cmdBootCheck(ctx context.Context) error {
 // the server and must not drive this terminal.
 func printUndoLine(line string) { fmt.Println("   ", runner.Printable(line)) }
 
+// target is how status and undo reach a server: this machine, or over SSH
+// with the connection from the flags or from a plan file.
+type target struct {
+	fs              *flag.FlagSet
+	host, user, key *string
+	file            *string
+	port            *int
+	here            *bool
+	hostKey         string // the plan's pinned host key
+}
+
+func targetFlags(fs *flag.FlagSet) *target {
+	return &target{
+		fs:   fs,
+		host: fs.String("host", "", "address to connect to (tailnet IP or name)"),
+		here: fs.Bool("here", false, "this machine instead of a server over SSH"),
+		port: fs.Int("port", 22, "SSH port"),
+		user: fs.String("user", "root", "SSH user"),
+		key:  fs.String("key", "", "private key file (default: ssh-agent and ~/.ssh keys)"),
+		file: fs.String("f", "", "plan file: take the address, port, user and key from it"),
+	}
+}
+
+// resolve fills in what a plan file says and no flag overrides. The lockdown
+// closed the plan's public address, so the server is reached at its private
+// one: the existing network's address, or its name in the tailnet.
+func (t *target) resolve() error {
+	if *t.file != "" {
+		p, err := plan.Load(*t.file)
+		if err != nil {
+			return err
+		}
+		set := map[string]bool{}
+		t.fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+		switch {
+		case p.Local && !set["host"]:
+			*t.here = true
+		case !p.Local:
+			if !set["port"] {
+				*t.port = p.Server.Port
+			}
+			if !set["user"] {
+				*t.user = p.Server.User
+			}
+			if !set["key"] {
+				*t.key = p.Server.KeyPath
+			}
+			t.hostKey = p.Server.HostKey
+			if !set["host"] && !*t.here {
+				switch {
+				case p.Tailscale.UseExisting:
+					*t.host = p.Tailscale.AdminAddress
+				case p.Tailscale.Hostname != "":
+					*t.host = p.Tailscale.Hostname
+				default:
+					return errors.New("the plan does not name the server in the tailnet (tailscale.hostname is empty); add --host with its tailnet address or name")
+				}
+			}
+		}
+	}
+	if *t.host == "" && !*t.here {
+		return errors.New("needs --host ADDR, -f plan.json, or --here on the server itself")
+	}
+	return nil
+}
+
+func (t *target) where() string {
+	if *t.here {
+		return "this machine"
+	}
+	return *t.host
+}
+
+// connect returns the host to work on and what ends the connection to it.
+func (t *target) connect(ctx context.Context, prompt textui.Prompter) (remote.Host, func(), error) {
+	if *t.here {
+		h, err := localhost.New(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return h, func() {}, nil
+	}
+	auth := sshx.Auth{User: *t.user, KeyPath: *t.key, Password: os.Getenv("SECURE_SETUP_PASSWORD"), Passphrase: os.Getenv("SECURE_SETUP_PASSPHRASE")}
+	c, err := sshx.Dial(ctx, net.JoinHostPort(*t.host, strconv.Itoa(*t.port)), auth, sshx.HostKeyPolicy{Prompter: prompt, Fingerprint: t.hostKey})
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := c.EnsureRoot(ctx); err != nil {
+		c.Close()
+		return nil, nil, err
+	}
+	return c, func() { c.Close() }, nil
+}
+
+// cmdStatus shows what a server has of the lockdown and what is wrong with
+// it. It changes nothing and exits with 1 when it finds a problem.
+func cmdStatus(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	t := targetFlags(fs)
+	asJSON := fs.Bool("json", false, "print the report as JSON")
+	yes := fs.Bool("yes", false, "accept a first-seen host key without asking")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := t.resolve(); err != nil {
+		return fmt.Errorf("status %w", err)
+	}
+	// Questions go to stderr, so stdout carries nothing but the report.
+	host, done, err := t.connect(ctx, textui.Prompter{AssumeYes: *yes, Out: os.Stderr})
+	if err != nil {
+		return err
+	}
+	defer done()
+	st, err := runner.ReadStatus(ctx, host)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(st); err != nil {
+			return err
+		}
+	} else {
+		fmt.Print(st.Text())
+	}
+	if !st.OK {
+		return fmt.Errorf("%d problem(s) with the lockdown of %s", len(st.Problems), t.where())
+	}
+	return nil
+}
+
 func cmdUndo(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("undo", flag.ContinueOnError)
-	host := fs.String("host", "", "address to connect to (tailnet IP or name)")
-	here := fs.Bool("here", false, "undo on this machine instead of over SSH")
-	port := fs.Int("port", 22, "SSH port")
-	user := fs.String("user", "root", "SSH user")
-	key := fs.String("key", "", "private key file (default: ssh-agent and ~/.ssh keys)")
+	t := targetFlags(fs)
 	yes := fs.Bool("yes", false, "do not ask")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *host == "" && !*here {
-		return errors.New("undo needs --host ADDR, or --here on the server itself")
-	}
-	where := *host
-	if *here {
-		where = "this machine"
+	if err := t.resolve(); err != nil {
+		return fmt.Errorf("undo %w", err)
 	}
 	prompt := textui.Prompter{AssumeYes: *yes}
 	if !*yes {
-		ok, err := prompt.Confirm(ctx, "Remove the secure-setup firewall, timers and sshd change on "+where+"?", "The server becomes reachable from the whole internet again.")
+		ok, err := prompt.Confirm(ctx, "Remove the secure-setup firewall, timers and sshd change on "+t.where()+"?", "The server becomes reachable from the whole internet again.")
 		if err != nil {
 			return err
 		}
@@ -414,21 +599,10 @@ func cmdUndo(ctx context.Context, args []string) error {
 			return errors.New("not confirmed")
 		}
 	}
-	if *here {
-		h, err := localhost.New(ctx)
-		if err != nil {
-			return err
-		}
-		return h.Script(ctx, undoScript, printUndoLine)
-	}
-	auth := sshx.Auth{User: *user, KeyPath: *key, Password: os.Getenv("SECURE_SETUP_PASSWORD"), Passphrase: os.Getenv("SECURE_SETUP_PASSPHRASE")}
-	c, err := sshx.Dial(ctx, fmt.Sprintf("%s:%d", *host, *port), auth, sshx.HostKeyPolicy{Prompter: prompt})
+	host, done, err := t.connect(ctx, prompt)
 	if err != nil {
 		return err
 	}
-	defer c.Close()
-	if err := c.EnsureRoot(ctx); err != nil {
-		return err
-	}
-	return c.Script(ctx, undoScript, printUndoLine)
+	defer done()
+	return host.Script(ctx, undoScript, printUndoLine)
 }

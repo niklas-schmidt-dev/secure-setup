@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/niklas-schmidt-dev/secure-setup/internal/remote"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/runner"
 	"github.com/niklas-schmidt-dev/secure-setup/internal/sshx"
+	"github.com/niklas-schmidt-dev/secure-setup/internal/textui"
 )
 
 type phase int
@@ -47,21 +49,23 @@ const (
 
 // Run starts the wizard and blocks until it ends.
 func Run(ctx context.Context, p *plan.Plan, version string) error {
-	return run(ctx, p, version, nil)
+	return run(ctx, p, version, nil, "")
 }
 
 // RunHere starts the wizard for this machine (`secure-setup here`): no
-// connection questions, the rest is the same.
-func RunHere(ctx context.Context, p *plan.Plan, version string, host *localhost.Host) error {
-	return run(ctx, p, version, host)
+// connection questions, the rest is the same. loadedFrom names the saved
+// plan p was read from, when the answers of an earlier run are filled in.
+func RunHere(ctx context.Context, p *plan.Plan, version string, host *localhost.Host, loadedFrom string) error {
+	return run(ctx, p, version, host, loadedFrom)
 }
 
-func run(ctx context.Context, p *plan.Plan, version string, local *localhost.Host) error {
+func run(ctx context.Context, p *plan.Plan, version string, local *localhost.Host, loadedFrom string) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	m := newModel(runCtx, cancel, p, version)
 	if local != nil {
 		m.local = local
+		m.loadedFrom = loadedFrom
 		m.phase = phasePreflight
 		m.form = nil
 	}
@@ -115,13 +119,16 @@ type model struct {
 	tsAuthKey   string
 	tsSSH       bool
 	webChoice   string
+	customWeb   []int // web ports of a loaded plan that the wizard has no choice for
+	noSync      bool  // the loaded plan has web ports without the daily Cloudflare refresh
 	tunnelToken string
 	extraPorts  string
 	allowPing   bool
 	harden      bool
 	rollback    int
 	confirmBy   string
-	confirmed   bool
+	review      string // the choice on the review: apply, change or quit
+	loadedFrom  string // the saved plan the answers were filled in from
 	preflightOK bool
 
 	spin  spinner.Model
@@ -135,7 +142,7 @@ type model struct {
 
 	// run screen
 	running    bool // the runner has not returned yet
-	aborted    bool // ctrl+c, a signal, or No on the review
+	aborted    bool // ctrl+c, a signal, or Quit on the review
 	signalled  bool // a signal, not a person: leave once the run has returned
 	steps      []string
 	states     []stepState
@@ -146,6 +153,7 @@ type model struct {
 	result     *runner.Result
 	runErr     error
 	savedPath  string
+	transcript *textui.Transcript // the log file of the run
 }
 
 func newModel(ctx context.Context, cancel context.CancelFunc, p *plan.Plan, version string) *model {
@@ -157,32 +165,58 @@ func newModel(ctx context.Context, cancel context.CancelFunc, p *plan.Plan, vers
 		port:       strconv.Itoa(p.Server.Port),
 		authMethod: "key",
 		keyPath:    p.Server.KeyPath,
-		tsHostname: p.Tailscale.Hostname,
-		tsSSH:      p.Tailscale.SSH,
-		webChoice:  webChoiceFor(p.Firewall),
-		allowPing:  p.Firewall.AllowPing,
-		harden:     p.SSH.Harden,
-		rollback:   p.Firewall.RollbackSeconds,
-		confirmBy:  p.Firewall.ConfirmBy,
 		width:      80,
 		height:     24,
 	}
+	m.bind()
 	m.spin = spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(lipgloss.NewStyle().Foreground(colorAccent)))
 	m.vp = viewport.New(78, 10)
 	m.form = m.connectForm()
+	return m
+}
+
+// bind fills the answers of the Tailscale and firewall questions from the
+// plan: the defaults, a plan given with -f, or the one saved by an earlier
+// run for this server.
+func (m *model) bind() {
+	p := m.plan
+	m.tsHostname = p.Tailscale.Hostname
+	m.tsSSH = p.Tailscale.SSH
+	m.webChoice = webChoiceFor(p.Firewall)
+	m.noSync = len(p.Firewall.WebPorts) > 0 && !p.Firewall.CloudflareSync
+	m.customWeb = nil
+	if m.webChoice == "custom" {
+		m.customWeb = slices.Clone(p.Firewall.WebPorts)
+	}
+	m.allowPing = p.Firewall.AllowPing
+	m.harden = p.SSH.Harden
+	m.rollback = p.Firewall.RollbackSeconds
+	m.confirmBy = p.Firewall.ConfirmBy
 	if m.confirmBy == "" {
 		m.confirmBy = plan.ConfirmLogin
 	}
-	if len(p.Firewall.TailnetPorts) > 0 {
-		var extra []int
-		for _, port := range p.Firewall.TailnetPorts {
-			if port != 22 {
-				extra = append(extra, port)
-			}
+	var extra []int
+	for _, port := range p.Firewall.TailnetPorts {
+		if port != 22 {
+			extra = append(extra, port)
 		}
-		m.extraPorts = plan.FormatPorts(extra)
 	}
-	return m
+	m.extraPorts = plan.FormatPorts(extra)
+}
+
+// loadSaved brings back the answers of the last run for this server, so a
+// second pass through the wizard starts from them and not from the defaults.
+// What was just typed about the connection stays.
+func (m *model) loadSaved() {
+	path := plan.DefaultSavePath(m.plan.Server.Host)
+	saved, err := plan.Load(path)
+	if err != nil || saved.Local {
+		return
+	}
+	saved.Server = m.plan.Server
+	*m.plan = saved
+	m.bind()
+	m.loadedFrom = path
 }
 
 func webChoiceFor(f plan.Firewall) string {
@@ -190,12 +224,14 @@ func webChoiceFor(f plan.Firewall) string {
 		return "tunnel"
 	}
 	switch plan.FormatPorts(f.WebPorts) {
+	case "443":
+		return "https"
 	case "80, 443":
 		return "both"
 	case "":
 		return "none"
 	}
-	return "https"
+	return "custom"
 }
 
 // ---- forms ----
@@ -235,6 +271,9 @@ func (m *model) tailscaleForm() *huh.Form {
 	if m.tsHostname == "" {
 		m.tsHostname = f.Hostname
 	}
+	if m.loadedFrom != "" {
+		desc += "\nYour answers from the last run are filled in (" + shortenHome(m.loadedFrom) + ")."
+	}
 	target := "this server"
 	if m.local != nil {
 		target = "this machine"
@@ -258,15 +297,22 @@ func (m *model) firewallForm() *huh.Form {
 	if f.Docker {
 		note += "\nDocker found: published container ports stay reachable from the tailnet, and from the internet only via Cloudflare on the web ports."
 	}
+	if m.loadedFrom != "" {
+		note += "\nYour answers from the last run are filled in (" + shortenHome(m.loadedFrom) + ")."
+	}
+	web := []huh.Option[string]{
+		huh.NewOption("HTTPS (443) from Cloudflare's IP ranges only (recommended)", "https"),
+		huh.NewOption("HTTP (80) and HTTPS (443) from Cloudflare's IP ranges only", "both"),
+		huh.NewOption("Cloudflare Tunnel: no open port at all (stronger protection)", "tunnel"),
+		huh.NewOption("No web traffic at all", "none"),
+	}
+	if len(m.customWeb) > 0 {
+		// A plan can name other ports than the wizard offers; keep them.
+		web = append([]huh.Option[string]{huh.NewOption("TCP "+plan.FormatPorts(m.customWeb)+" from Cloudflare's IP ranges only (from the plan)", "custom")}, web...)
+	}
 	fields := []huh.Field{
 		huh.NewNote().Title("Firewall").Description(note),
-		huh.NewSelect[string]().Title("Web traffic").
-			Options(
-				huh.NewOption("HTTPS (443) from Cloudflare's IP ranges only (recommended)", "https"),
-				huh.NewOption("HTTP (80) and HTTPS (443) from Cloudflare's IP ranges only", "both"),
-				huh.NewOption("Cloudflare Tunnel: no open port at all (stronger protection)", "tunnel"),
-				huh.NewOption("No web traffic at all", "none"),
-			).Value(&m.webChoice),
+		huh.NewSelect[string]().Title("Web traffic").Options(web...).Value(&m.webChoice),
 		huh.NewInput().Title("Extra ports reachable from the tailnet (optional)").
 			Description(fmt.Sprintf("SSH (%d) is always included. Example: 8080, 9090", f.SSHPort)).
 			Placeholder("none").Value(&m.extraPorts).Validate(validatePorts),
@@ -294,6 +340,9 @@ func (m *model) firewallForm() *huh.Form {
 	update := huh.NewConfirm().Title("Update the system first?").
 		Description("Installs pending package updates (apt upgrade, dnf upgrade, ...) before anything else. Recommended.").
 		Affirmative("Yes").Negative("No").Value(&m.plan.UpdateSystem)
+	auto := huh.NewConfirm().Title("Install security updates automatically from now on?").
+		Description("Turns on the system's own unattended updates (unattended-upgrades, dnf-automatic), so fixes keep arriving after this run. Recommended.").
+		Affirmative("Yes").Negative("No").Value(&m.plan.AutoUpdates)
 	reboot := huh.NewConfirm().Title("Reboot at the end and check that everything comes back?").
 		Description("The real test that the rules, Tailscale and sshd survive a restart. Recommended.").
 		Affirmative("Yes").Negative("No").Value(&m.plan.Reboot)
@@ -303,14 +352,33 @@ func (m *model) firewallForm() *huh.Form {
 		huh.NewInput().Title("Tunnel token or install command").Description("The whole \"Install as service\" command (sudo cloudflared service install eyJ...) or just the token. Leave empty on a rerun to keep the stored token.").
 			EchoMode(huh.EchoModePassword).Value(&m.tunnelToken),
 	).WithHideFunc(func() bool { return m.webChoice != "tunnel" })
-	return m.sized(huh.NewForm(huh.NewGroup(fields...), tunnel, huh.NewGroup(update, reboot)).WithShowHelp(true))
+	return m.sized(huh.NewForm(huh.NewGroup(fields...), tunnel, huh.NewGroup(update, auto, reboot)).WithShowHelp(true))
 }
 
 func (m *model) reviewForm() *huh.Form {
+	m.review = "apply"
 	return m.sized(huh.NewForm(huh.NewGroup(
 		huh.NewNote().Title("Review").Description(m.summary()),
-		huh.NewConfirm().Title("Apply this setup now?").Affirmative("Apply").Negative("Quit").Value(&m.confirmed),
+		huh.NewSelect[string]().Title("Apply this setup now?").
+			Options(
+				huh.NewOption("Apply", "apply"),
+				huh.NewOption("Change the answers", "change"),
+				huh.NewOption("Quit, the server stays as it is", "quit"),
+			).Value(&m.review),
 	)).WithShowHelp(true))
+}
+
+// questions shows the first page of questions: Tailscale, unless the server
+// is on the tailnet already or uses another private network.
+func (m *model) questions() tea.Cmd {
+	if m.facts.TailscaleState == "Running" || m.plan.Tailscale.UseExisting {
+		m.phase = phaseFirewall
+		m.form = m.firewallForm()
+	} else {
+		m.phase = phaseTailscale
+		m.form = m.tailscaleForm()
+	}
+	return m.form.Init()
 }
 
 func (m *model) summary() string {
@@ -337,19 +405,29 @@ func (m *model) summary() string {
 	if p.Tailscale.SSH {
 		line("", "Tailscale SSH enabled")
 	}
+	if !p.Tailscale.UseExisting && len(p.Tailscale.Tags) > 0 {
+		line("", "tags "+strings.Join(p.Tailscale.Tags, ", ")+" (from the plan)")
+	}
+	if !p.Tailscale.UseExisting && p.Tailscale.LoginServer != "" {
+		line("", "login server "+p.Tailscale.LoginServer+" (from the plan)")
+	}
 	line("SSH", "TCP "+plan.FormatPorts(p.Firewall.TailnetPorts)+" on "+p.Tailscale.AdminInterface+" only")
 	switch {
 	case p.Firewall.CloudflareTunnel:
 		line("Web", "through a Cloudflare Tunnel; no web port opened")
 	case len(p.Firewall.WebPorts) > 0:
 		line("Web", "TCP "+plan.FormatPorts(p.Firewall.WebPorts)+" on "+p.Firewall.WANInterface+", Cloudflare only")
-		line("", "ranges refreshed daily")
+		line("", map[bool]string{true: "ranges refreshed daily", false: "ranges not refreshed (from the plan)"}[p.Firewall.CloudflareSync])
 	default:
 		line("Web", "none")
+	}
+	if public := plan.PublicPorts(p.Firewall); public != "" {
+		line("Public ports", public+", open to the whole internet (from the plan)")
 	}
 	line("Ping", yesNo(p.Firewall.AllowPing))
 	line("Password login", map[bool]string{true: "disabled (keys only)", false: "unchanged"}[p.SSH.Harden])
 	line("System update", map[bool]string{true: "first, before anything is installed", false: "skipped"}[p.UpdateSystem])
+	line("Automatic updates", map[bool]string{true: "turned on", false: "unchanged"}[p.AutoUpdates])
 	line("Reboot", map[bool]string{true: "at the end, then check that everything comes back", false: "no"}[p.Reboot])
 	line("Everything else", "dropped")
 	line("Rollback window", fmt.Sprintf("%d seconds", p.Firewall.RollbackSeconds))
@@ -507,14 +585,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.facts = msg.facts
 		m.err = nil
-		if m.facts.TailscaleState == "Running" || m.plan.Tailscale.UseExisting {
-			m.phase = phaseFirewall
-			m.form = m.firewallForm()
-		} else {
-			m.phase = phaseTailscale
-			m.form = m.tailscaleForm()
-		}
-		return m, m.form.Init()
+		return m, m.questions()
 
 	case runEventMsg:
 		m.applyEvent(runner.Event(msg))
@@ -595,6 +666,7 @@ func (m *model) advance() (tea.Model, tea.Cmd) {
 			p.Server.KeyPath = ""
 			p.Server.Password = m.password
 		}
+		m.loadSaved()
 		m.phase = phasePreflight
 		m.form = nil
 		m.err = nil
@@ -614,6 +686,8 @@ func (m *model) advance() (tea.Model, tea.Cmd) {
 			p.Firewall.WebPorts = []int{443}
 		case "both":
 			p.Firewall.WebPorts = []int{80, 443}
+		case "custom":
+			p.Firewall.WebPorts = slices.Clone(m.customWeb)
 		default:
 			p.Firewall.WebPorts = nil
 		}
@@ -621,7 +695,7 @@ func (m *model) advance() (tea.Model, tea.Cmd) {
 		if p.Firewall.CloudflareTunnel && m.tunnelToken != "" {
 			p.Firewall.TunnelToken = m.tunnelToken
 		}
-		p.Firewall.CloudflareSync = len(p.Firewall.WebPorts) > 0
+		p.Firewall.CloudflareSync = len(p.Firewall.WebPorts) > 0 && !m.noSync
 		extra, _ := plan.ParsePorts(m.extraPorts)
 		p.Firewall.TailnetPorts = append([]int{m.facts.SSHPort}, extra...)
 		p.Firewall.AllowPing = m.allowPing
@@ -651,7 +725,11 @@ func (m *model) advance() (tea.Model, tea.Cmd) {
 		return m, m.form.Init()
 
 	case phaseReview:
-		if !m.confirmed {
+		switch m.review {
+		case "change":
+			// Back to the questions; every answer is still filled in.
+			return m, m.questions()
+		case "quit":
 			return m.abort()
 		}
 		m.phase = phaseRun
@@ -692,7 +770,7 @@ func (m *model) preflight() tea.Cmd {
 		if auth.Password != "" && p.SSH.Harden && len(sshx.LocalPublicKeys(auth, "")) == 0 {
 			return preflightMsg{err: errors.New("no public key on this computer to install on the server; run `ssh-keygen -t ed25519` first (or choose key authentication)")}
 		}
-		c, err := sshx.Dial(ctx, p.Address(), auth, sshx.HostKeyPolicy{Prompter: pr})
+		c, err := sshx.Dial(ctx, p.Address(), auth, sshx.HostKeyPolicy{Prompter: pr, Fingerprint: p.Server.HostKey})
 		if err != nil {
 			return preflightMsg{err: err}
 		}
@@ -725,12 +803,19 @@ func checkFacts(f *remote.Facts) error {
 }
 
 func (m *model) startRun() tea.Cmd {
-	r := runner.New(runner.Options{
-		Plan:   m.plan,
-		Report: func(e runner.Event) { m.send(runEventMsg(e)) },
-		Prompt: prompter{send: m.send},
-		Local:  m.local,
-	})
+	name := m.plan.Server.Host
+	if m.local != nil {
+		name = "this-machine"
+	}
+	opts := runner.Options{Plan: m.plan, Prompt: prompter{send: m.send}, Local: m.local}
+	// The run screen goes away with the wizard; the log file stays.
+	log := textui.OpenTranscript(name, runner.New(opts).Steps())
+	m.transcript = log
+	opts.Report = func(e runner.Event) {
+		log.Event(e)
+		m.send(runEventMsg(e))
+	}
+	r := runner.New(opts)
 	m.steps = r.Steps()
 	m.states = make([]stepState, len(m.steps))
 	m.skipReason = make([]string, len(m.steps))
@@ -739,6 +824,10 @@ func (m *model) startRun() tea.Cmd {
 	ctx := m.ctx
 	return func() tea.Msg {
 		res, err := r.Run(ctx)
+		if err == nil {
+			log.Note(Summary(m.plan, res))
+		}
+		log.Close()
 		return runDoneMsg{result: res, err: err}
 	}
 }
@@ -901,6 +990,9 @@ func (m *model) doneView() string {
 		}
 		b.WriteString(Summary(m.plan, m.result))
 	}
+	if m.transcript != nil && m.transcript.Path != "" {
+		b.WriteString("\nLog of this run:  " + shortenHome(m.transcript.Path) + "\n")
+	}
 	b.WriteString("\n" + mutedStyle.Render("press q to exit"))
 	return b.String()
 }
@@ -944,6 +1036,9 @@ func Summary(p *plan.Plan, r *runner.Result) string {
 		}
 		line("Web", "TCP "+plan.FormatPorts(r.WebPorts)+" from Cloudflare only"+where)
 	}
+	if public := plan.PublicPorts(p.Firewall); public != "" {
+		warn("Public ports", public+", open to the whole internet")
+	}
 	switch {
 	case r.Local && r.ConfirmedBy != "":
 		line("Confirmed by", r.ConfirmedBy)
@@ -965,6 +1060,11 @@ func Summary(p *plan.Plan, r *runner.Result) string {
 		line("Tailscale SSH", "on: logins over the tailnet follow your tailnet policy")
 	case r.TailscaleSSH != "":
 		warn("Tailscale SSH", r.TailscaleSSH)
+	}
+	if r.AutoUpdates {
+		line("Updates", "install by themselves from now on")
+	} else if r.AutoUpdatesNote != "" {
+		warn("Updates", "not automatic: "+r.AutoUpdatesNote)
 	}
 	switch {
 	case r.RebootChecked:

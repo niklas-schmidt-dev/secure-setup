@@ -4,9 +4,11 @@
 package plan
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -24,6 +26,10 @@ type Plan struct {
 	Local bool `json:"local,omitempty"`
 	// UpdateSystem installs pending package updates before anything else.
 	UpdateSystem bool `json:"update_system"`
+	// AutoUpdates turns on the distribution's unattended updates
+	// (unattended-upgrades, dnf-automatic), so the server keeps getting
+	// security fixes after the one update of this run.
+	AutoUpdates bool `json:"auto_updates"`
 	// Reboot restarts the server at the end and checks that the lockdown
 	// comes back on its own.
 	Reboot    bool      `json:"reboot"`
@@ -46,10 +52,14 @@ const (
 
 // Server is how we reach the machine today, over its public address.
 type Server struct {
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	User       string `json:"user"`
-	KeyPath    string `json:"key_path,omitempty"`
+	Host    string `json:"host"`
+	Port    int    `json:"port"`
+	User    string `json:"user"`
+	KeyPath string `json:"key_path,omitempty"`
+	// HostKey pins the server's host key: its SHA256 fingerprint as
+	// `ssh-keygen -lf` prints it. The first connection then accepts that key
+	// only, instead of asking or (with --yes) trusting the first key seen.
+	HostKey    string `json:"host_key,omitempty"`
 	Password   string `json:"-"`
 	Passphrase string `json:"-"`
 }
@@ -65,11 +75,22 @@ type Tailscale struct {
 	UDPPort        int    `json:"udp_port"`
 	UseExisting    bool   `json:"use_existing_network,omitempty"`
 	AdminAddress   string `json:"admin_address,omitempty"`
+	// Tags are the ACL tags the server asks for when it joins ("tag:server").
+	// The auth key, or whoever approves the login link, must own them.
+	Tags []string `json:"tags,omitempty"`
+	// LoginServer is the control server to join instead of Tailscale's, for
+	// a self-hosted one such as Headscale: "https://headscale.example.com".
+	LoginServer string `json:"login_server,omitempty"`
 }
 
 // Firewall is the inbound policy.
 type Firewall struct {
-	WebPorts        []int  `json:"web_ports"`
+	WebPorts []int `json:"web_ports"`
+	// PublicTCPPorts and PublicUDPPorts are open to the whole internet, for
+	// a service that cannot sit behind Cloudflare or the tailnet: mail, a
+	// game server, WireGuard. The SSH port is never one of them.
+	PublicTCPPorts  []int  `json:"public_tcp_ports,omitempty"`
+	PublicUDPPorts  []int  `json:"public_udp_ports,omitempty"`
 	AllowPing       bool   `json:"allow_ping"`
 	TailnetPorts    []int  `json:"tailnet_ports"`
 	TailnetAll      bool   `json:"tailnet_all"`
@@ -107,6 +128,7 @@ type SSH struct {
 func Default() Plan {
 	return Plan{
 		UpdateSystem: true,
+		AutoUpdates:  true,
 		Reboot:       true,
 		Server:       Server{Port: 22, User: "root"},
 		Tailscale:    Tailscale{AdminInterface: "tailscale0", UDPPort: 41641},
@@ -122,8 +144,11 @@ func Default() Plan {
 }
 
 var (
-	hostRe  = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
-	ifaceRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
+	tagRe         = regexp.MustCompile(`^tag:[A-Za-z][A-Za-z0-9-]*$`)
+	loginServerRe = regexp.MustCompile(`^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$`)
+	hostKeyRe     = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
+	hostRe        = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+	ifaceRe       = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 )
 
 // Validate checks the plan for mistakes that would make the run fail or lock
@@ -148,6 +173,9 @@ func (p *Plan) Validate() error {
 		if p.Server.User == "" {
 			errs = append(errs, errors.New("server user is required"))
 		}
+		if p.Server.HostKey != "" && !hostKeyRe.MatchString(p.Server.HostKey) {
+			errs = append(errs, fmt.Errorf("host key %q is not a SHA256 fingerprint; use what `ssh-keygen -lf` prints, such as SHA256:AbC...", p.Server.HostKey))
+		}
 	}
 	if p.Tailscale.AdminInterface == "" {
 		errs = append(errs, errors.New("admin interface is required"))
@@ -158,6 +186,14 @@ func (p *Plan) Validate() error {
 		} else if a, err := netip.ParseAddr(p.Tailscale.AdminAddress); err != nil || a.Zone() != "" {
 			errs = append(errs, fmt.Errorf("admin address %q is not an IP address", p.Tailscale.AdminAddress))
 		}
+	}
+	for _, tag := range p.Tailscale.Tags {
+		if !tagRe.MatchString(tag) {
+			errs = append(errs, fmt.Errorf("tailscale tag %q must look like tag:server", tag))
+		}
+	}
+	if s := p.Tailscale.LoginServer; s != "" && !loginServerRe.MatchString(s) {
+		errs = append(errs, fmt.Errorf("login_server %q is not an http or https address such as https://headscale.example.com", s))
 	}
 	for _, n := range p.Firewall.ExtraWANInterfaces {
 		switch {
@@ -170,9 +206,20 @@ func (p *Plan) Validate() error {
 	if p.Tailscale.UDPPort < 1 || p.Tailscale.UDPPort > 65535 {
 		errs = append(errs, fmt.Errorf("tailscale UDP port %d is out of range", p.Tailscale.UDPPort))
 	}
-	for _, port := range append(append([]int{}, p.Firewall.WebPorts...), p.Firewall.TailnetPorts...) {
+	for _, port := range slices.Concat(p.Firewall.WebPorts, p.Firewall.TailnetPorts, p.Firewall.PublicTCPPorts, p.Firewall.PublicUDPPorts) {
 		if port < 1 || port > 65535 {
 			errs = append(errs, fmt.Errorf("port %d is out of range", port))
+		}
+	}
+	// UDP too: a web port open to everyone over UDP serves HTTP/3 past Cloudflare.
+	for _, port := range slices.Concat(p.Firewall.PublicTCPPorts, p.Firewall.PublicUDPPorts) {
+		if slices.Contains(p.Firewall.WebPorts, port) {
+			errs = append(errs, fmt.Errorf("port %d is a web port and a public port: it would be open to everyone, not only to Cloudflare", port))
+		}
+	}
+	for _, port := range p.Firewall.PublicTCPPorts {
+		if !p.Local && port == p.Server.Port {
+			errs = append(errs, fmt.Errorf("public_tcp_ports contains the SSH port %d: that would open SSH to the internet again", port))
 		}
 	}
 	if p.Firewall.RollbackSeconds < 30 || p.Firewall.RollbackSeconds > 900 {
@@ -237,18 +284,35 @@ func (p Plan) Address() string {
 	return net.JoinHostPort(p.Server.Host, strconv.Itoa(p.Server.Port))
 }
 
-// Load reads a plan file.
+// Load reads a plan file and validates it.
 func Load(path string) (Plan, error) {
+	p, err := Read(path)
+	if err != nil {
+		return Plan{}, err
+	}
+	if err := p.Validate(); err != nil {
+		return Plan{}, fmt.Errorf("%s: %w", path, err)
+	}
+	return p, nil
+}
+
+// Read reads a plan file on top of the defaults without validating it, for
+// a caller that still fills in values (`apply --host`).
+func Read(path string) (Plan, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Plan{}, err
 	}
 	p := Default()
-	if err := json.Unmarshal(data, &p); err != nil {
+	// A misspelt field would otherwise leave its default in force without a
+	// word: "web_port": [] keeps HTTPS open.
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
 		return Plan{}, fmt.Errorf("parse %s: %w", path, err)
 	}
-	if err := p.Validate(); err != nil {
-		return Plan{}, fmt.Errorf("%s: %w", path, err)
+	if _, err := dec.Token(); err != io.EOF {
+		return Plan{}, fmt.Errorf("parse %s: text after the plan's closing brace", path)
 	}
 	return p, nil
 }
@@ -270,13 +334,17 @@ const LocalSavePath = "/etc/secure-setup/plan.json"
 
 // DefaultSavePath is where the wizard stores the plan for replay.
 func DefaultSavePath(host string) string {
-	safe := strings.Map(func(r rune) rune {
+	return filepath.Join(ConfigDir(), SafeName(host)+".json")
+}
+
+// SafeName turns a server address into a file name.
+func SafeName(host string) string {
+	return strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-' {
 			return r
 		}
 		return '_'
 	}, host)
-	return filepath.Join(ConfigDir(), safe+".json")
 }
 
 // ConfigDir is ~/.config/secure-setup.
@@ -311,6 +379,19 @@ func ParsePorts(s string) ([]int, error) {
 		}
 	}
 	return out, nil
+}
+
+// PublicPorts describes the ports a plan opens to everyone, such as
+// "TCP 25, 587 and UDP 51820", or "" when there are none.
+func PublicPorts(f Firewall) string {
+	var parts []string
+	if len(f.PublicTCPPorts) > 0 {
+		parts = append(parts, "TCP "+FormatPorts(f.PublicTCPPorts))
+	}
+	if len(f.PublicUDPPorts) > 0 {
+		parts = append(parts, "UDP "+FormatPorts(f.PublicUDPPorts))
+	}
+	return strings.Join(parts, " and ")
 }
 
 // FormatPorts is the inverse of ParsePorts.

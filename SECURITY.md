@@ -20,11 +20,15 @@ It is a single static binary, run either on your machine or on the server
 - `github.com`, only through `install.sh`, to download a release
 
 It sends no telemetry and writes only the plan (never secrets) to
-`~/.config/secure-setup/<host>.json` or `/etc/secure-setup/plan.json`, and
+`~/.config/secure-setup/<host>.json` or `/etc/secure-setup/plan.json`, the
+log of each run to `~/.config/secure-setup/logs/` (readable by you only; it
+holds what the run printed, including a Tailscale login link), and
 `~/.ssh/known_hosts` after you accepted a host key. Only a host with no
 entry in known_hosts counts as a first contact (which `--yes` accepts); a
 different, revoked or certificate key, or a known_hosts file that cannot be
-parsed, is refused before any credential is sent.
+parsed, is refused before any credential is sent. With `--host-key` or
+`server.host_key`, a first contact is accepted only when the server presents
+the key you named.
 
 On the server it installs `nftables` and, unless you chose an existing private
 network, Tailscale through `https://tailscale.com/install.sh`. The
@@ -41,7 +45,12 @@ the tailnet. On the server it is a new login from another device: the admin
 rule's packet counter must move, and sshd (journal entries with _UID=0) must
 log an accepted login from a machine other than this one, over a connection
 that opened after the rules went live. An open TCP connection alone does not
-count. `secure-setup confirm` in that session is the explicit form. In
+count. `secure-setup confirm` in that session is the explicit form, and it
+refuses a connection that was open before or while the rules went live.
+With Tailscale SSH the session is not in the server's connection table, so
+there the command is the operator's own statement. A run that finds the
+rules of an earlier run still unconfirmed waits for their rollback timer
+before it changes anything. In
 unattended mode (`here --yes`) it is a self-check: admin rule loaded, a
 root-owned sshd socket on the tailnet address, Tailscale running and online,
 and an optional ping to a tailnet peer. Self-checks cannot see your tailnet

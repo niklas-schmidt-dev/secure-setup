@@ -62,8 +62,9 @@ type Options struct {
 	// Local runs the plan on this machine (`secure-setup here`) instead of
 	// over SSH. Plan.Local must be set too.
 	Local *localhost.Host
-	// Unattended means nobody answers prompts or opens links (`here --yes`,
-	// cloud-init). A local unattended run refuses the login-link join.
+	// Unattended means nobody answers prompts (`--yes`, cloud-init). A local
+	// unattended run refuses the login-link join; a run over SSH stops when
+	// this computer is not on the tailnet instead of asking again.
 	Unattended bool
 }
 
@@ -81,6 +82,8 @@ type Result struct {
 	Hardened        bool
 	HardenNote      string // why hardening was skipped, if it was
 	WebPorts        []int
+	AutoUpdates     bool   // the distribution's unattended updates are on
+	AutoUpdatesNote string // why they were not set up, when the plan asked for them
 	RebootNeeded    bool   // the system update needs a reboot to finish
 	RebootChecked   bool   // rebooted, and the lockdown came back on its own
 	Tunnel          bool   // web traffic arrives through a Cloudflare Tunnel
@@ -104,6 +107,7 @@ type Runner struct {
 	local      *localhost.Host
 	before     []remote.Session // sshd sessions open before or as the firewall went live
 	applyEpoch int64            // server clock once the rules were live
+	appliedAt  time.Time        // this clock once the rules were live and the rollback timer armed
 	tsState    *remote.TSStatus
 	sshdPrev   string // the sshd drop-in an earlier run left; restored on failure
 
@@ -146,6 +150,7 @@ func New(o Options) *Runner {
 	r.steps = []step{
 		{name: "Connect to the server", run: r.connect},
 		{name: "Update the system", skip: r.skipUpdate, run: r.updateSystem},
+		{name: autoUpdatesStep, skip: r.skipAutoUpdates, run: r.autoUpdates},
 		{name: "Install Tailscale", skip: func() string {
 			if ts.UseExisting {
 				return "using the existing private network " + ts.AdminAddress
@@ -283,8 +288,15 @@ func (r *Runner) dial(ctx context.Context, addr string, policy sshx.HostKeyPolic
 
 func (r *Runner) connect(ctx context.Context, log func(string)) error {
 	p := r.o.Plan
+	// The confirmation later needs this computer on the tailnet. Checked
+	// before the server is touched, not after it was updated and joined.
+	if !p.Tailscale.UseExisting {
+		if err := r.requireLocalTailscale(ctx, "nothing on the server has changed yet."); err != nil {
+			return err
+		}
+	}
 	log("connecting to " + p.Address() + " as " + p.Server.User)
-	c, err := r.dial(ctx, p.Address(), sshx.HostKeyPolicy{Prompter: r.o.Prompt, Warn: log})
+	c, err := r.dial(ctx, p.Address(), sshx.HostKeyPolicy{Prompter: r.o.Prompt, Warn: log, Fingerprint: p.Server.HostKey})
 	if err != nil {
 		return err
 	}
@@ -295,6 +307,9 @@ func (r *Runner) connect(ctx context.Context, log func(string)) error {
 	}
 	f, err := remote.Detect(ctx, c)
 	if err != nil {
+		return err
+	}
+	if f, err = r.settleEarlierRun(ctx, c, f, log); err != nil {
 		return err
 	}
 	r.facts = f
@@ -358,6 +373,47 @@ func (r *Runner) connect(ctx context.Context, log func(string)) error {
 	return nil
 }
 
+// How often a pending rollback of an earlier run is looked at, and for how
+// long: the longest rollback window a plan allows, and a minute.
+var (
+	settlePoll = 3 * time.Second
+	settleWait = 16 * time.Minute
+)
+
+// settleEarlierRun waits while the firewall of an earlier run still awaits
+// its confirmation, for example after that run lost its connection. Staging
+// over it would save those unconfirmed rules as the state to roll back to
+// and cancel their rollback timer. Once that timer has fired (or the other
+// run confirmed), the server is looked at again.
+func (r *Runner) settleEarlierRun(ctx context.Context, host remote.Host, f *remote.Facts, log func(string)) (*remote.Facts, error) {
+	if !f.RollbackArmed {
+		return f, nil
+	}
+	r.attention("the firewall of an earlier run still waits for its confirmation. This run waits until its rollback timer has settled it, so it starts from a confirmed state")
+	deadline, lastNote := time.Now().Add(settleWait), time.Now()
+	for {
+		if err := sleepCtx(ctx, settlePoll); err != nil {
+			return nil, err
+		}
+		pending, err := remote.RollbackPending(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		if !pending {
+			break
+		}
+		if time.Now().After(deadline) {
+			return nil, errors.New("the rollback timer of an earlier run is still pending; look at `systemctl status secure-setup-rollback.timer` on the server")
+		}
+		if time.Since(lastNote) >= 15*time.Second {
+			log("still waiting for the earlier run's rollback timer")
+			lastNote = time.Now()
+		}
+	}
+	log("the earlier run is settled; looking at the server again")
+	return remote.Detect(ctx, host)
+}
+
 func (r *Runner) ensureAuthorizedKey(ctx context.Context, log func(string)) error {
 	p := r.o.Plan
 	keys := sshx.LocalPublicKeys(r.auth(), p.SSH.PublicKeyPath)
@@ -415,7 +471,7 @@ func (r *Runner) joinTailnet(ctx context.Context, log func(string)) (err error) 
 		r.joinedByLink = true
 		defer func() { err = r.leaveUnverifiedTailnet(host, err, log) }()
 	}
-	err = remote.TailscaleUp(ctx, host, remote.UpOptions{AuthKey: key, Hostname: p.Tailscale.Hostname}, log,
+	err = remote.TailscaleUp(ctx, host, remote.UpOptions{AuthKey: key, Hostname: p.Tailscale.Hostname, Tags: p.Tailscale.Tags, LoginServer: p.Tailscale.LoginServer}, log,
 		func(url string) {
 			r.attention("Open this link in your browser to add the server to your tailnet:\n" + url)
 		})
@@ -487,6 +543,29 @@ func (r *Runner) enableTailscaleSSH(ctx context.Context, host remote.Host, log f
 	return nil
 }
 
+// requireLocalTailscale returns once this computer is on the tailnet, asking
+// to try again while it is not. A run that nobody answers stops instead: its
+// prompter would say yes forever.
+func (r *Runner) requireLocalTailscale(ctx context.Context, onAbort string) error {
+	for {
+		ok, detail := r.o.LocalTailscaleReady(ctx)
+		if ok {
+			return nil
+		}
+		if r.o.Unattended {
+			return errors.New("this computer is not on the tailnet, so the new firewall could not be confirmed from here (--yes does not wait for it): " + detail)
+		}
+		again, err := r.o.Prompt.Confirm(ctx, "Tailscale on this computer is not connected",
+			detail+"\n\nConnect this computer to the tailnet, then choose Yes to try again. No aborts; "+onAbort)
+		if err != nil {
+			return err
+		}
+		if !again {
+			return errors.New("this computer is not on the tailnet, so the new firewall could not be confirmed")
+		}
+	}
+}
+
 func (r *Runner) reachAdmin(ctx context.Context, log func(string)) (err error) {
 	// After a login-link join, only reaching the node from this computer
 	// shows the tailnet is the operator's; otherwise it leaves it again.
@@ -507,19 +586,8 @@ func (r *Runner) reachAdmin(ctx context.Context, log func(string)) (err error) {
 				r.result.DNSName = strings.TrimSuffix(st.Self.DNSName, ".")
 			}
 		}
-		for {
-			ok, detail := r.o.LocalTailscaleReady(ctx)
-			if ok {
-				break
-			}
-			again, err := r.o.Prompt.Confirm(ctx, "Tailscale on this computer is not connected",
-				detail+"\n\nConnect this computer to the tailnet, then choose Yes to try again. No aborts; the server stays reachable over its public address.")
-			if err != nil {
-				return err
-			}
-			if !again {
-				return errors.New("this computer is not on the tailnet, so the new firewall could not be confirmed")
-			}
+		if err := r.requireLocalTailscale(ctx, "the server stays reachable over its public address."); err != nil {
+			return err
 		}
 	}
 	if !remote.InterfaceExists(ctx, r.pub, p.Tailscale.AdminInterface) {
@@ -638,6 +706,31 @@ func (r *Runner) updateSystem(ctx context.Context, log func(string)) error {
 		r.result.RebootNeeded = true
 		r.attention("the update needs a reboot to finish (new kernel or core libraries); reboot once the setup is done")
 	}
+	return nil
+}
+
+const autoUpdatesStep = "Turn on automatic updates"
+
+func (r *Runner) skipAutoUpdates() string {
+	if !r.o.Plan.AutoUpdates {
+		return "not requested"
+	}
+	return ""
+}
+
+// autoUpdates turns on the distribution's unattended updates. A system
+// secure-setup has no recipe for is noted in the summary, not a failure.
+func (r *Runner) autoUpdates(ctx context.Context, log func(string)) error {
+	note, err := remote.EnableAutoUpdates(ctx, r.server(), r.facts, log)
+	if err != nil {
+		return err
+	}
+	if note != "" {
+		r.result.AutoUpdatesNote = note
+		log("not set up: " + note)
+		return nil
+	}
+	r.result.AutoUpdates = true
 	return nil
 }
 
@@ -797,6 +890,16 @@ func (r *Runner) extraWAN(log func(string)) []string {
 
 func (r *Runner) stageFirewallOn(ctx context.Context, host remote.Host, log func(string)) error {
 	p := r.o.Plan
+	// The plan can only know the port a remote run connects to; the ports
+	// sshd listens on are known here.
+	for _, port := range r.facts.AllSSHPorts() {
+		if slices.Contains(p.Firewall.PublicTCPPorts, port) {
+			return fmt.Errorf("public_tcp_ports contains %d, a port sshd listens on: that would open SSH to the internet again", port)
+		}
+	}
+	if public := plan.PublicPorts(p.Firewall); public != "" {
+		log("open to the whole internet, as the plan asks: " + public)
+	}
 	elements := nftgen.RenderElements(nil, nil)
 	if len(p.Firewall.WebPorts) > 0 {
 		log("fetching Cloudflare IP ranges")
@@ -815,6 +918,8 @@ func (r *Runner) stageFirewallOn(ctx context.Context, host remote.Host, log func
 		TailnetTCPPorts:  p.Firewall.TailnetPorts,
 		TailnetAll:       p.Firewall.TailnetAll,
 		WebPorts:         p.Firewall.WebPorts,
+		PublicTCPPorts:   p.Firewall.PublicTCPPorts,
+		PublicUDPPorts:   p.Firewall.PublicUDPPorts,
 		AllowPing:        p.Firewall.AllowPing,
 		TailscaleUDPPort: p.Tailscale.UDPPort,
 	})
@@ -830,13 +935,24 @@ func (r *Runner) stageFirewallOn(ctx context.Context, host remote.Host, log func
 }
 
 func (r *Runner) applyFirewall(ctx context.Context, log func(string)) error {
+	// The first connection carries the last steps of the run (Tailscale SSH,
+	// the reboot) and was idle since the private one took over. A packet
+	// each way now makes it an established connection for the tracking that
+	// staging switched on, before the rules drop what tracking does not know.
+	if _, err := r.pub.Output(ctx, "true"); err != nil {
+		log("note: the first connection of this run does not answer any more: " + shortErr(err))
+	}
 	return r.applyFirewallOn(ctx, r.admin, log)
 }
 
 func (r *Runner) applyFirewallOn(ctx context.Context, host remote.Host, log func(string)) error {
 	secs := r.o.Plan.Firewall.RollbackSeconds
 	log(fmt.Sprintf("if the next step cannot confirm within %ds, the server restores its previous firewall by itself", secs))
-	return remote.ApplyFirewall(ctx, host, secs, log)
+	if err := remote.ApplyFirewall(ctx, host, secs, log); err != nil {
+		return err
+	}
+	r.appliedAt = time.Now()
+	return nil
 }
 
 func (r *Runner) confirmFirewall(ctx context.Context, log func(string)) error {
@@ -851,7 +967,8 @@ func (r *Runner) confirmFirewall(ctx context.Context, log func(string)) error {
 	}
 	fresh, err := r.dialAdminRetry(ctx, target, wait, log)
 	if err != nil {
-		return r.waitForRollback(ctx, log, err)
+		r.attention("the new rules block the private connection; waiting for the server to roll back on its own")
+		return r.waitForRollback(ctx, r.admin, log, err)
 	}
 	defer fresh.Close()
 	if at := r.rollbackMarker(ctx, fresh); at != "" {
@@ -882,23 +999,39 @@ func (r *Runner) rolledBackError(at string, cause error) error {
 	return fmt.Errorf("the new firewall could not be confirmed and the server rolled back to its previous rules %s: %w", when, cause)
 }
 
-func (r *Runner) waitForRollback(ctx context.Context, log func(string), cause error) error {
-	secs := r.o.Plan.Firewall.RollbackSeconds
-	r.attention("the new rules block the private connection; waiting for the server to roll back on its own")
+// How often the marker of a fired rollback is looked for, and how long after
+// the timer was due.
+var (
+	rollbackPoll  = 2 * time.Second
+	rollbackGrace = 25 * time.Second
+)
+
+// waitForRollback waits until the server has restored its previous firewall.
+// It looks for the marker the rollback leaves, until shortly after the timer
+// was due, instead of sleeping through the whole window a second time.
+func (r *Runner) waitForRollback(ctx context.Context, host remote.Host, log func(string), cause error) error {
 	log("reason: " + shortErr(cause))
-	wait := time.Duration(secs)*time.Second + 10*time.Second
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(wait):
+	deadline := r.appliedAt.Add(time.Duration(r.o.Plan.Firewall.RollbackSeconds)*time.Second + rollbackGrace)
+	for {
+		// The connection may be dead; a read must not outlast the wait.
+		mctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		at := r.rollbackMarker(mctx, host)
+		cancel()
+		if at != "" {
+			log("the previous firewall state is active again")
+			return r.rolledBackError(at, cause)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if time.Now().After(deadline) {
+			log("warning: the rollback marker was not found; check `nft list ruleset`")
+			return fmt.Errorf("the new firewall could not be confirmed; the rollback should have fired but left no marker: %w", cause)
+		}
+		if err := sleepCtx(ctx, rollbackPoll); err != nil {
+			return err
+		}
 	}
-	at := r.rollbackMarker(ctx, r.admin)
-	if at == "" {
-		log("warning: the rollback marker was not found; check `nft list ruleset` on the server")
-		return fmt.Errorf("the new firewall could not be confirmed; the rollback should have fired but left no marker: %w", cause)
-	}
-	log("the previous firewall state is active again")
-	return r.rolledBackError(at, cause)
 }
 
 func (r *Runner) verify(ctx context.Context, log func(string)) error {
@@ -921,6 +1054,9 @@ func (r *Runner) verify(ctx context.Context, log func(string)) error {
 	// A brand-new TCP connection to the public address must now be blocked.
 	// (The connection from step 1 survives: it is an established flow.)
 	pubIP := r.facts.WANIPv4
+	if pubIP == "" {
+		pubIP = r.facts.WANIPv6 // a server without IPv4
+	}
 	if pubIP == "" {
 		pubIP = "<public address>"
 	}

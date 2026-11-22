@@ -85,6 +85,56 @@ reach a 10.91.1.1 22 || { echo "FAIL: the admin address is not reachable"; exit 
 if reach a 10.91.4.1 22; then echo "FAIL: another address on the admin interface reaches SSH"; exit 1; fi
 if reach a 10.91.3.2 8080; then echo "FAIL: the internet-facing admin interface reaches the workload"; exit 1; fi
 echo "existing network: SSH only to the admin address; its interface is filtered like the internet"
+
+# Public ports: what the plan opens to everyone is reachable from an uplink,
+# on the host and as a published container port; nothing else is, SSH least
+# of all.
+nc -lk 2525 </dev/null >/dev/null 2>&1 &
+sleep 1
+sed 's/"eth0"/"upa"/g' /t/goldens/default.nft > /tmp/no-public.nft
+nft -f /tmp/no-public.nft
+if reach a 10.91.1.1 2525 || reach a 10.91.3.2 8080; then echo "FAIL: control did not reproduce"; exit 1; fi
+sed -e 's/"eth0"/"upa"/g' -e 's/{ 25, 587 }/{ 2525, 8080 }/g' /t/goldens/public-ports.nft > /tmp/public.nft
+nft -f /tmp/public.nft
+reach a 10.91.1.1 2525 || { echo "FAIL: a public port on the host is not reachable"; exit 1; }
+reach a 10.91.3.2 8080 || { echo "FAIL: a public port published by the workload is not reachable"; exit 1; }
+if reach a 10.91.1.1 22; then echo "FAIL: public ports opened SSH"; exit 1; fi
+if reach a 10.91.2.2 9090; then echo "FAIL: public ports let the uplink reach another port"; exit 1; fi
+echo "public ports: reachable from the internet on the host and on the workload, and nothing else"
+
+# DHCPv6: the reply to a lease request comes from the router's link-local
+# address, port 547, to this host's port 546. It answers a multicast, so it is
+# not "established" traffic; dropped, the IPv6 address is lost when the lease
+# runs out. Nothing else from that port gets in.
+v6on='for f in /proc/sys/net/ipv6/conf/all/disable_ipv6 /proc/sys/net/ipv6/conf/default/disable_ipv6; do echo 0 > $f; done'
+sh -c "$v6on"
+ip netns add r
+ip netns exec r sh -c "$v6on"
+ip link add upr type veth peer name r0 netns r
+ip link set upr up; ip -n r link set r0 up
+for i in 1 2 3 4 5 6; do
+	ll=$(ip -6 -o addr show dev upr scope link -tentative | awk '{print $4}' | cut -d/ -f1)
+	[ -n "$ll" ] && [ -n "$(ip -n r -6 -o addr show dev r0 scope link -tentative)" ] && break
+	sleep 1
+done
+[ -n "$ll" ] || { echo "FAIL: no link-local address in the lab"; exit 1; }
+from547() {
+	: > /tmp/got
+	timeout 4 nc -6 -u -l "$1" > /tmp/got 2>/dev/null &
+	sleep 1
+	ip netns exec r sh -c "echo lease | nc -6 -u -w 1 -p 547 '$ll%r0' $1" >/dev/null 2>&1 || true
+	sleep 1
+	grep -q lease /tmp/got
+}
+sed -e 's/"eth0"/"upr"/g' -e '/udp sport 547/d' /t/goldens/default.nft > /tmp/no-dhcp6.nft
+nft -f /tmp/no-dhcp6.nft
+if from547 546; then echo "FAIL: control did not reproduce"; exit 1; fi
+echo "without the rule: a DHCPv6 reply is dropped"
+sed 's/"eth0"/"upr"/g' /t/goldens/default.nft > /tmp/dhcp6.nft
+nft -f /tmp/dhcp6.nft
+from547 546 || { echo "FAIL: a DHCPv6 reply is dropped"; exit 1; }
+if from547 5000; then echo "FAIL: the DHCPv6 rule lets another port in"; exit 1; fi
+echo "DHCPv6 replies reach the client port, and only that port"
 echo "ALL CHECKS PASSED"
 INNER
 COPYFILE_DISABLE=1 tar --no-xattrs -C "$tmp" -cf - . | docker --context "$ctx" run --rm -i --privileged debian:bookworm-slim \

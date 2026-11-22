@@ -56,6 +56,40 @@ const bootIncludeMarker = "# secure-setup: added the next line"
 const ufwInitScript = `ufw_init=; for p in /lib/ufw/ufw-init /usr/lib/ufw/ufw-init; do if [ -x "$p" ]; then ufw_init=$p; break; fi; done
 `
 
+// rollbackPendingTest is a shell test that succeeds while an applied ruleset
+// still awaits its outcome: its timer is armed and nothing has claimed the
+// outcome yet, or the rollback is running right now.
+const rollbackPendingTest = `{ systemctl is-active --quiet ` + RollbackUnit + `.service 2>/dev/null || { systemctl is-active --quiet ` + RollbackUnit + `.timer 2>/dev/null && [ ! -e ` + DecidedDir + ` ]; }; }`
+
+// RollbackPending reports whether an earlier run's firewall still awaits its
+// confirmation or its rollback.
+func RollbackPending(ctx context.Context, c Host) (bool, error) {
+	out, err := c.Output(ctx, "if "+rollbackPendingTest+"; then echo pending; fi")
+	if err != nil {
+		return false, fmt.Errorf("look for a pending rollback: %w", err)
+	}
+	return out == "pending", nil
+}
+
+// TrackTable is a table without any policy of its own. It exists between
+// staging and the apply, only to switch connection tracking on.
+const TrackTable = "secure_setup_track"
+
+// trackScript starts connection tracking before the new rules are loaded.
+// They accept established connections and drop the rest, and a connection
+// that tracking first sees in mid-stream counts as new until a packet has
+// gone each way. Where nothing tracked connections so far (no Tailscale, no
+// Docker, or only for the other address family), the next packet of an open
+// SSH session would be dropped when the rules go live. With tracking on from
+// here, the sessions that carry the run are established by then.
+var trackScript = fmt.Sprintf(`printf '%%s\n' 'table inet %[1]s' 'delete table inet %[1]s' 'table inet %[1]s {' 'chain input { type filter hook input priority 0; policy accept; ct state new counter; }' '}' > %[2]s/track.nft
+if nft -f %[2]s/track.nft 2>/dev/null; then
+	echo "connection tracking is on: sessions that are open now stay known when the rules change"
+else
+	echo "note: connection tracking could not be started early; a session that is idle may be cut when the rules go live"
+fi
+`, TrackTable, StateDir)
+
 // FirewallFiles is what PrepareFirewall installs.
 type FirewallFiles struct {
 	Ruleset        string // full nftables.conf
@@ -82,10 +116,14 @@ func PrepareFirewall(ctx context.Context, c Host, f *Facts, files FirewallFiles,
 	// Record which host firewall is running; it keeps running until the
 	// rollback timer is armed (ApplyFirewall).
 	// The rules must be able to survive a reboot before they go live.
-	record := NFTBootFileScript + `if [ -z "$boot" ]; then echo "nftables.service loads no ruleset file on this system, so the new rules could not survive a reboot" >&2; exit 1; fi
+	// Checked again here, right before this run writes over the staging
+	// files: another run may have applied its rules since this one looked.
+	record := `if ` + rollbackPendingTest + `; then echo "the rules of another secure-setup run still wait for their confirmation; this run leaves them alone. Run it again once that run has finished: its rollback timer settles it" >&2; exit 1; fi
+` + NFTBootFileScript + `if [ -z "$boot" ]; then echo "nftables.service loads no ruleset file on this system, so the new rules could not survive a reboot" >&2; exit 1; fi
 echo "nftables.service loads $boot at boot"
 `
 	record += fmt.Sprintf("mkdir -p %s\nrm -f %s %s %s\n", StateDir, UFWWasActive, FirewalldWasActive, FirewalldWasEnabled)
+	record += trackScript
 	if f.UFWActive {
 		record += "touch " + UFWWasActive + "\n"
 		onLine("ufw is active: it stops when the new rules go live and comes back if they roll back")
@@ -160,14 +198,16 @@ echo "rollback timer armed: fires in %[3]ds unless confirmed"
 fi
 if [ -e %[7]s ]; then systemctl stop firewalld; echo "firewalld stopped (comes back if the rules roll back)"; fi
 if ! nft -f %[5]s; then
+	nft delete table inet %[10]s 2>/dev/null || true
 	systemctl stop %[1]s.timer >/dev/null 2>&1 || true
 	if [ -e %[6]s ]; then if [ -n "$ufw_init" ]; then "$ufw_init" start >/dev/null || true; else ufw --force enable >/dev/null || true; fi; fi
 	if [ -e %[7]s ]; then systemctl start firewalld || true; fi
 	echo "applying the ruleset failed; the previous firewall is back" >&2
 	exit 1
 fi
+nft delete table inet %[10]s 2>/dev/null || true
 echo "new firewall rules are live"
-`, RollbackUnit, RolledBackMarker, rollbackSeconds, RollbackScript, PendingPath, UFWWasActive, FirewalldWasActive, ufwInitScript, DecidedDir)
+`, RollbackUnit, RolledBackMarker, rollbackSeconds, RollbackScript, PendingPath, UFWWasActive, FirewalldWasActive, ufwInitScript, DecidedDir, TrackTable)
 	if err := c.Script(ctx, script, onLine); err != nil {
 		return fmt.Errorf("apply firewall: %w", err)
 	}
@@ -220,7 +260,12 @@ if [ -e %[3]s ] || [ -e %[4]s ]; then
 	echo "firewalld disabled and masked so it cannot replace the rules at boot (nftables takes over)"
 fi
 `, UFWWasActive, UFWRetired, FirewalldWasActive, FirewalldWasEnabled, FirewalldRetired)
-	sync := ""
+	// A plan without the refresh switches off the timer an earlier run left.
+	sync := fmt.Sprintf(`if systemctl is-enabled --quiet %[1]s.timer 2>/dev/null || systemctl is-active --quiet %[1]s.timer 2>/dev/null; then
+	systemctl disable --now %[1]s.timer >/dev/null 2>&1 || true
+	echo "daily Cloudflare range refresh switched off: this plan does not use it"
+fi
+`, SyncUnit)
 	if cloudflareSync {
 		sync = fmt.Sprintf(`systemctl enable --now %s.timer >/dev/null 2>&1
 echo "daily Cloudflare range refresh enabled (%s.timer)"
