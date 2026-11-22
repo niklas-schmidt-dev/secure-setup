@@ -5,11 +5,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -56,6 +59,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdRender(args[1:])
 	case "boot-check":
 		return cmdBootCheck(ctx)
+	case "status":
+		return cmdStatus(ctx, args[1:])
 	case "undo":
 		return cmdUndo(ctx, args[1:])
 	case "version", "--version", "-v":
@@ -75,6 +80,8 @@ func usage() {
 From your computer:
   secure-setup                      guided setup of a server over SSH (TUI)
   secure-setup apply -f plan.json   run a saved plan without the wizard
+                                    (--host ADDR: the same plan for another server)
+  secure-setup status --host ADDR   show the lockdown of a server and what is wrong with it
   secure-setup undo --host ADDR     remove the firewall, timers and sshd change again
 
 On the server itself:
@@ -82,7 +89,11 @@ On the server itself:
   secure-setup here --yes           no questions: defaults, confirmed by self-checks
   secure-setup here -f plan.json    run a saved plan on this machine
   secure-setup confirm              in a new tailnet session: confirm a waiting setup
+  secure-setup status --here        show the lockdown of this machine (--json for scripts)
   secure-setup undo --here          remove it from this machine again
+
+status and undo also take -f plan.json instead of --host: the address, port,
+user and key come from the plan.
 
   secure-setup render -f plan.json  print the nftables ruleset a plan produces
 
@@ -404,27 +415,149 @@ func cmdBootCheck(ctx context.Context) error {
 // the server and must not drive this terminal.
 func printUndoLine(line string) { fmt.Println("   ", runner.Printable(line)) }
 
+// target is how status and undo reach a server: this machine, or over SSH
+// with the connection from the flags or from a plan file.
+type target struct {
+	fs              *flag.FlagSet
+	host, user, key *string
+	file            *string
+	port            *int
+	here            *bool
+}
+
+func targetFlags(fs *flag.FlagSet) *target {
+	return &target{
+		fs:   fs,
+		host: fs.String("host", "", "address to connect to (tailnet IP or name)"),
+		here: fs.Bool("here", false, "this machine instead of a server over SSH"),
+		port: fs.Int("port", 22, "SSH port"),
+		user: fs.String("user", "root", "SSH user"),
+		key:  fs.String("key", "", "private key file (default: ssh-agent and ~/.ssh keys)"),
+		file: fs.String("f", "", "plan file: take the address, port, user and key from it"),
+	}
+}
+
+// resolve fills in what a plan file says and no flag overrides. The lockdown
+// closed the plan's public address, so the server is reached at its private
+// one: the existing network's address, or its name in the tailnet.
+func (t *target) resolve() error {
+	if *t.file != "" {
+		p, err := plan.Load(*t.file)
+		if err != nil {
+			return err
+		}
+		set := map[string]bool{}
+		t.fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+		switch {
+		case p.Local && !set["host"]:
+			*t.here = true
+		case !p.Local:
+			if !set["port"] {
+				*t.port = p.Server.Port
+			}
+			if !set["user"] {
+				*t.user = p.Server.User
+			}
+			if !set["key"] {
+				*t.key = p.Server.KeyPath
+			}
+			if !set["host"] && !*t.here {
+				switch {
+				case p.Tailscale.UseExisting:
+					*t.host = p.Tailscale.AdminAddress
+				case p.Tailscale.Hostname != "":
+					*t.host = p.Tailscale.Hostname
+				default:
+					return errors.New("the plan does not name the server in the tailnet (tailscale.hostname is empty); add --host with its tailnet address or name")
+				}
+			}
+		}
+	}
+	if *t.host == "" && !*t.here {
+		return errors.New("needs --host ADDR, -f plan.json, or --here on the server itself")
+	}
+	return nil
+}
+
+func (t *target) where() string {
+	if *t.here {
+		return "this machine"
+	}
+	return *t.host
+}
+
+// connect returns the host to work on and what ends the connection to it.
+func (t *target) connect(ctx context.Context, prompt textui.Prompter) (remote.Host, func(), error) {
+	if *t.here {
+		h, err := localhost.New(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return h, func() {}, nil
+	}
+	auth := sshx.Auth{User: *t.user, KeyPath: *t.key, Password: os.Getenv("SECURE_SETUP_PASSWORD"), Passphrase: os.Getenv("SECURE_SETUP_PASSPHRASE")}
+	c, err := sshx.Dial(ctx, net.JoinHostPort(*t.host, strconv.Itoa(*t.port)), auth, sshx.HostKeyPolicy{Prompter: prompt})
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := c.EnsureRoot(ctx); err != nil {
+		c.Close()
+		return nil, nil, err
+	}
+	return c, func() { c.Close() }, nil
+}
+
+// cmdStatus shows what a server has of the lockdown and what is wrong with
+// it. It changes nothing and exits with 1 when it finds a problem.
+func cmdStatus(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	t := targetFlags(fs)
+	asJSON := fs.Bool("json", false, "print the report as JSON")
+	yes := fs.Bool("yes", false, "accept a first-seen host key without asking")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := t.resolve(); err != nil {
+		return fmt.Errorf("status %w", err)
+	}
+	// Questions go to stderr, so stdout carries nothing but the report.
+	host, done, err := t.connect(ctx, textui.Prompter{AssumeYes: *yes, Out: os.Stderr})
+	if err != nil {
+		return err
+	}
+	defer done()
+	st, err := runner.ReadStatus(ctx, host)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(st); err != nil {
+			return err
+		}
+	} else {
+		fmt.Print(st.Text())
+	}
+	if !st.OK {
+		return fmt.Errorf("%d problem(s) with the lockdown of %s", len(st.Problems), t.where())
+	}
+	return nil
+}
+
 func cmdUndo(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("undo", flag.ContinueOnError)
-	host := fs.String("host", "", "address to connect to (tailnet IP or name)")
-	here := fs.Bool("here", false, "undo on this machine instead of over SSH")
-	port := fs.Int("port", 22, "SSH port")
-	user := fs.String("user", "root", "SSH user")
-	key := fs.String("key", "", "private key file (default: ssh-agent and ~/.ssh keys)")
+	t := targetFlags(fs)
 	yes := fs.Bool("yes", false, "do not ask")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *host == "" && !*here {
-		return errors.New("undo needs --host ADDR, or --here on the server itself")
-	}
-	where := *host
-	if *here {
-		where = "this machine"
+	if err := t.resolve(); err != nil {
+		return fmt.Errorf("undo %w", err)
 	}
 	prompt := textui.Prompter{AssumeYes: *yes}
 	if !*yes {
-		ok, err := prompt.Confirm(ctx, "Remove the secure-setup firewall, timers and sshd change on "+where+"?", "The server becomes reachable from the whole internet again.")
+		ok, err := prompt.Confirm(ctx, "Remove the secure-setup firewall, timers and sshd change on "+t.where()+"?", "The server becomes reachable from the whole internet again.")
 		if err != nil {
 			return err
 		}
@@ -432,21 +565,10 @@ func cmdUndo(ctx context.Context, args []string) error {
 			return errors.New("not confirmed")
 		}
 	}
-	if *here {
-		h, err := localhost.New(ctx)
-		if err != nil {
-			return err
-		}
-		return h.Script(ctx, undoScript, printUndoLine)
-	}
-	auth := sshx.Auth{User: *user, KeyPath: *key, Password: os.Getenv("SECURE_SETUP_PASSWORD"), Passphrase: os.Getenv("SECURE_SETUP_PASSPHRASE")}
-	c, err := sshx.Dial(ctx, fmt.Sprintf("%s:%d", *host, *port), auth, sshx.HostKeyPolicy{Prompter: prompt})
+	host, done, err := t.connect(ctx, prompt)
 	if err != nil {
 		return err
 	}
-	defer c.Close()
-	if err := c.EnsureRoot(ctx); err != nil {
-		return err
-	}
-	return c.Script(ctx, undoScript, printUndoLine)
+	defer done()
+	return host.Script(ctx, undoScript, printUndoLine)
 }

@@ -92,6 +92,23 @@ d exec "$srv" sh -c 'sshd -T | grep -q "^passwordauthentication no"' && echo "  
 d exec "$srv" grep -q 'Managed by secure-setup' /etc/nftables.conf && echo "   /etc/nftables.conf persisted"
 d exec "$srv" test -f /etc/nftables.conf.secure-setup.bak && echo "   previous nftables.conf backed up"
 
+echo "== status of the locked-down server"
+# -f: the address comes from the plan, here the private network's address.
+d exec "$cli" secure-setup status -f /root/plan.json >/tmp/e2e-status.log 2>&1 || { cat /tmp/e2e-status.log; fail "status found problems after run 1"; }
+sed 's/^/   /' /tmp/e2e-status.log
+grep -q "TCP 22, 8080 on eth1 to $prvip only" /tmp/e2e-status.log || fail "status does not show the admin rule"
+grep -Eq "TCP 443 from Cloudflare only \\([0-9]+ IPv4 and [0-9]+ IPv6 ranges, refreshed daily\\)" /tmp/e2e-status.log || fail "status does not show the web rule"
+grep -q "port 22, keys only" /tmp/e2e-status.log || fail "status does not show the sshd policy"
+grep -q "No problems found" /tmp/e2e-status.log || fail "status did not end with its verdict"
+d exec "$cli" secure-setup status --host "$prvip" --key /root/.ssh/id_ed25519 --json >/tmp/e2e-status.json 2>/dev/null || fail "status --json failed"
+grep -q '"ok": true' /tmp/e2e-status.json && grep -q '"admin_address": "'"$prvip"'"' /tmp/e2e-status.json || { cat /tmp/e2e-status.json; fail "status --json lacks the verdict or the admin address"; }
+# Something breaks: status names it and exits with 1.
+d exec "$srv" systemctl disable -q nftables
+if d exec "$cli" secure-setup status -f /root/plan.json >/tmp/e2e-status-bad.log 2>&1; then cat /tmp/e2e-status-bad.log; fail "status missed a disabled nftables.service"; fi
+grep -q "nftables.service is not enabled at boot" /tmp/e2e-status-bad.log || { cat /tmp/e2e-status-bad.log; fail "status did not name the problem"; }
+d exec "$srv" systemctl enable -q nftables
+echo "   status reports the lockdown, as text and JSON, and names a problem"
+
 echo "== run 2: rules that would lock us out must roll back"
 d exec -i "$cli" sh -c 'cat > /root/plan-bad.json' <<JSON
 {
@@ -120,10 +137,13 @@ if d exec "$cli" nc -z -w 5 "$pubip" 22; then fail "public ssh open after rollba
 d exec "$srv" test -f /var/lib/secure-setup/rolled-back && echo "   rollback marker written"
 
 echo "== undo"
-d exec "$cli" secure-setup undo --host "$prvip" --user root --key /root/.ssh/id_ed25519 --yes 2>&1 | sed 's/^/   /'
+d exec "$cli" secure-setup undo -f /root/plan.json --yes 2>&1 | sed 's/^/   /'
 d exec "$srv" nft list table inet secure_setup >/dev/null 2>&1 && fail "table still present after undo" || echo "   table removed"
 d exec "$cli" nc -z -w 5 "$pubip" 22 && echo "   public ssh open again"
 d exec "$srv" test -f /etc/ssh/sshd_config.d/00-secure-setup.conf && fail "sshd drop-in still present" || echo "   sshd drop-in removed"
 d exec "$srv" systemctl is-enabled secure-setup-cloudflare-sync.timer >/dev/null 2>&1 && fail "sync timer still enabled" || echo "   sync timer removed"
+if d exec "$cli" secure-setup status --host "$pubip" --key /root/.ssh/id_ed25519 >/tmp/e2e-status-undone.log 2>&1; then cat /tmp/e2e-status-undone.log; fail "status sees a lockdown after undo"; fi
+grep -q "nothing of secure-setup is in place" /tmp/e2e-status-undone.log || { cat /tmp/e2e-status-undone.log; fail "status after undo"; }
+echo "   status: nothing of secure-setup is in place"
 echo
 echo "E2E PASSED"

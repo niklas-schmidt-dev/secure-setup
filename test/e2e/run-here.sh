@@ -134,6 +134,9 @@ d exec "$srv" grep -q 'Managed by secure-setup' /etc/nftables.conf && echo "   /
 d exec "$srv" test -f /var/lib/secure-setup/confirm-expect && fail "confirm-expect left behind" || echo "   confirm markers cleaned"
 d exec "$srv" grep -q "Confirmed by.*login by root from $cliprv" /root/run1.log || fail "summary does not name the confirming login"
 echo "   summary names the confirming login"
+d exec "$srv" secure-setup status --here >/tmp/e2e-here-status.log 2>&1 || { cat /tmp/e2e-here-status.log; fail "status found problems after run 1"; }
+grep -q "TCP 22, 8080 on eth1 to $prvip only" /tmp/e2e-here-status.log && grep -q "No problems found" /tmp/e2e-here-status.log || { cat /tmp/e2e-here-status.log; fail "status --here does not show the lockdown"; }
+echo "   status --here: no problems"
 
 echo "== run 2: a connection from BEFORE the apply must not count, not even with \`secure-setup confirm\`"
 # ControlMaster: one TCP connection opened before the apply, reused for the
@@ -147,6 +150,9 @@ sleep 5
 d exec "$srv" grep -q "EXIT=" /root/run2.log && { d exec "$srv" tail -20 /root/run2.log; fail "the old session was counted as a confirmation"; }
 d exec "$srv" test -f /var/lib/secure-setup/confirm-expect || fail "confirm-expect missing while waiting"
 echo "   old session correctly ignored"
+out=$(d exec "$srv" secure-setup status --here 2>&1 || true)
+echo "$out" | grep -q "still wait for their confirmation" || fail "status does not say the rules are unconfirmed: $out"
+echo "   status --here: the loaded rules are not confirmed yet"
 out=$(d exec "$srv" sh -c "SSH_CONNECTION='10.250.100.3 50001 $pubip 22' secure-setup confirm 2>&1 || true")
 echo "$out" | grep -q "came in over $pubip, not $prvip" || fail "confirm accepted a public-address session: $out"
 echo "   confirm refused a session over the public address"
