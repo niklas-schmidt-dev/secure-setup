@@ -116,7 +116,10 @@ func PrepareFirewall(ctx context.Context, c Host, f *Facts, files FirewallFiles,
 	// Record which host firewall is running; it keeps running until the
 	// rollback timer is armed (ApplyFirewall).
 	// The rules must be able to survive a reboot before they go live.
-	record := NFTBootFileScript + `if [ -z "$boot" ]; then echo "nftables.service loads no ruleset file on this system, so the new rules could not survive a reboot" >&2; exit 1; fi
+	// Checked again here, right before this run writes over the staging
+	// files: another run may have applied its rules since this one looked.
+	record := `if ` + rollbackPendingTest + `; then echo "the rules of another secure-setup run still wait for their confirmation; this run leaves them alone. Run it again once that run has finished: its rollback timer settles it" >&2; exit 1; fi
+` + NFTBootFileScript + `if [ -z "$boot" ]; then echo "nftables.service loads no ruleset file on this system, so the new rules could not survive a reboot" >&2; exit 1; fi
 echo "nftables.service loads $boot at boot"
 `
 	record += fmt.Sprintf("mkdir -p %s\nrm -f %s %s %s\n", StateDir, UFWWasActive, FirewalldWasActive, FirewalldWasEnabled)

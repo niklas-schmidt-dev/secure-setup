@@ -68,6 +68,42 @@ func TestPrepareDoesNotRetireHostFirewall(t *testing.T) {
 	}
 }
 
+// Staging looks once more for the unconfirmed rules of another run before it
+// writes anything: its files are that run's rollback and its ruleset.
+func TestStagingLeavesAnotherRunAlone(t *testing.T) {
+	h := &recordHost{}
+	if err := PrepareFirewall(context.Background(), h, &Facts{PkgMgr: "apt-get", NFT: true}, FirewallFiles{Ruleset: "x", Elements: "y"}, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	first := h.scripts[0]
+	check, write := strings.Index(first, "if "+rollbackPendingTest+"; then"), strings.Index(first, "mkdir -p "+StateDir)
+	if check != 0 || write < check || !strings.Contains(first[:write], "exit 1") {
+		t.Fatalf("the first staging script must refuse before it writes:\n%s", first)
+	}
+}
+
+// sshd can listen on several ports, by Port or by ListenAddress. The list of
+// open connections covers all of them, and a failing ss is an error: an empty
+// list would let a connection from before the apply pass as new.
+func TestSessionsCoverEverySSHPort(t *testing.T) {
+	var cmd string
+	h := &recordHost{output: func(c string) string { cmd = c; return "0 0 100.64.0.5:2222 100.64.0.9:41000" }}
+	got, err := Sessions(context.Background(), h, 22, 2222)
+	if err != nil || len(got) != 1 || !strings.Contains(cmd, "'( sport = :22 or sport = :2222 )'") || strings.Contains(cmd, "|| true") {
+		t.Fatalf("sessions %v, err %v, command %q", got, err, cmd)
+	}
+	if _, err := Sessions(context.Background(), &bareHost{}, 22); err == nil {
+		t.Fatal("a failing ss gave an empty list")
+	}
+	if !strings.Contains(detectScript, `$1=="listenaddress"{n=split($2,a,":"); printf "%s ", a[n]}`) {
+		t.Fatal("detect does not read the ports of ListenAddress")
+	}
+	f := &Facts{SSHPort: 22}
+	if !slices.Equal(f.AllSSHPorts(), []int{22}) {
+		t.Fatalf("AllSSHPorts without a list: %v", f.AllSSHPorts())
+	}
+}
+
 // Staging switches connection tracking on, so the sessions that are open are
 // established connections by the time the rules drop everything else; the
 // table that did it goes once the rules are loaded, also when loading fails.
@@ -519,7 +555,8 @@ func TestBootFileWiring(t *testing.T) {
 	if err := PrepareFirewall(context.Background(), h, &Facts{NFT: true}, FirewallFiles{Ruleset: "x"}, func(string) {}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(h.scripts[0], NFTBootFileScript) || !strings.Contains(h.scripts[0], `if [ -z "$boot" ]`) {
+	// Before anything is written; only the look for another run's rules comes earlier.
+	if boot, write := strings.Index(h.scripts[0], NFTBootFileScript+`if [ -z "$boot" ]`), strings.Index(h.scripts[0], "mkdir -p "+StateDir); boot < 0 || write < boot {
 		t.Fatal("staging does not check the boot file first")
 	}
 	h = &recordHost{}

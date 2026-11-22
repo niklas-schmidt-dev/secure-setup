@@ -336,7 +336,7 @@ func (r *Runner) hereApplyFirewall(ctx context.Context, log func(string)) error 
 	if _, err := r.local.Output(ctx, "rm -f "+ConfirmedPath+" "+ConfirmExpectPath); err != nil {
 		return err
 	}
-	before, err := remote.Sessions(ctx, r.local, r.facts.SSHPort)
+	before, err := remote.Sessions(ctx, r.local, r.facts.AllSSHPorts()...)
 	if err != nil {
 		return err
 	}
@@ -345,7 +345,7 @@ func (r *Runner) hereApplyFirewall(ctx context.Context, log func(string)) error 
 	}
 	// A login counts only from here on, over a connection the new rules let
 	// in: one that was open before or while they went live came in earlier.
-	live, err := remote.Sessions(ctx, r.local, r.facts.SSHPort)
+	live, err := remote.Sessions(ctx, r.local, r.facts.AllSSHPorts()...)
 	if err != nil {
 		return err
 	}
@@ -421,7 +421,7 @@ func (r *Runner) confirmByLogin(ctx context.Context, log func(string)) error {
 			if !arrived {
 				arrived = true
 				from := ""
-				if now, err := remote.Sessions(ctx, r.local, r.facts.SSHPort); err == nil {
+				if now, err := remote.Sessions(ctx, r.local, r.facts.AllSSHPorts()...); err == nil {
 					if fresh := remote.NewSessionsTo(r.before, now, adminAddr, self...); len(fresh) > 0 {
 						from = " from " + fresh[0].Peer.Addr().String()
 					}

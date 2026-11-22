@@ -62,7 +62,7 @@ type Facts struct {
 	Systemd    bool
 	NFT        bool
 	SSHPort    int
-	SSHPorts   []int // every port sshd listens on, SSHPort first
+	SSHPorts   []int // every port sshd listens on (Port and ListenAddress), SSHPort first
 	WANIface   string
 	WANIfaces  []string // every device with a default route (IPv4 and IPv6), WANIface first
 	PublicNICs []string // network cards with a public address, with or without a default route
@@ -100,7 +100,7 @@ if command -v tailscale >/dev/null 2>&1; then echo TAILSCALE=1; else echo TAILSC
 if command -v docker >/dev/null 2>&1; then echo DOCKER=1; else echo DOCKER=0; fi
 sshd_bin=$(command -v sshd || echo /usr/sbin/sshd)
 printf 'SSHPORT=%s\n' "$("$sshd_bin" -T 2>/dev/null | awk '$1=="port"{print $2; exit}')"
-printf 'SSHPORTS=%s\n' "$("$sshd_bin" -T 2>/dev/null | awk '$1=="port"{printf "%s ", $2}')"
+printf 'SSHPORTS=%s\n' "$("$sshd_bin" -T 2>/dev/null | awk '$1=="port"{printf "%s ", $2} $1=="listenaddress"{n=split($2,a,":"); printf "%s ", a[n]}')"
 printf 'WAN=%s\n' "$(ip -o -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
 printf 'WAN6=%s\n' "$(ip -o -6 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
 printf 'WANS=%s\n' "$({ ip -o -4 route show default; ip -o -6 route show default; } 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); break}}' | tr '\n' ' ')"
@@ -203,6 +203,14 @@ func Detect(ctx context.Context, c Host) (*Facts, error) {
 		}
 	}
 	return f, nil
+}
+
+// AllSSHPorts lists every port sshd listens on, at least SSHPort.
+func (f *Facts) AllSSHPorts() []int {
+	if len(f.SSHPorts) == 0 {
+		return []int{f.SSHPort}
+	}
+	return f.SSHPorts
 }
 
 // publicNICs picks the network cards that carry a public address from pairs

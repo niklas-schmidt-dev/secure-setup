@@ -892,7 +892,7 @@ func (r *Runner) stageFirewallOn(ctx context.Context, host remote.Host, log func
 	p := r.o.Plan
 	// The plan can only know the port a remote run connects to; the ports
 	// sshd listens on are known here.
-	for _, port := range append([]int{r.facts.SSHPort}, r.facts.SSHPorts...) {
+	for _, port := range r.facts.AllSSHPorts() {
 		if slices.Contains(p.Firewall.PublicTCPPorts, port) {
 			return fmt.Errorf("public_tcp_ports contains %d, a port sshd listens on: that would open SSH to the internet again", port)
 		}
