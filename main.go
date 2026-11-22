@@ -104,17 +104,22 @@ func cmdHere(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	p := plan.Default()
+	interactive := term.IsTerminal(int(os.Stdin.Fd())) && !*yes
+	p, loadedFrom := plan.Default(), ""
 	if *file != "" {
 		if p, err = plan.Load(*file); err != nil {
 			return err
+		}
+	} else if interactive && !*noTUI {
+		// The wizard starts from the answers of the last run on this machine.
+		if saved, err := plan.Load(plan.LocalSavePath); err == nil && saved.Local {
+			p, loadedFrom = saved, plan.LocalSavePath
 		}
 	}
 	p.Local = true
 	p.Server.User = localhost.LoginUser()
 	p.Tailscale.AuthKey = os.Getenv("TS_AUTHKEY")
 	p.Firewall.TunnelToken = os.Getenv("CLOUDFLARE_TUNNEL_TOKEN")
-	interactive := term.IsTerminal(int(os.Stdin.Fd())) && !*yes
 	switch {
 	case *confirm != "":
 		p.Firewall.ConfirmBy = *confirm
@@ -128,7 +133,7 @@ func cmdHere(ctx context.Context, args []string) error {
 		return err
 	}
 	if interactive && !*noTUI {
-		return tui.RunHere(ctx, &p, version, host)
+		return tui.RunHere(ctx, &p, version, host, loadedFrom)
 	}
 	return runHereText(ctx, &p, host, *yes || !interactive)
 }

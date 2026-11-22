@@ -188,11 +188,13 @@ wait_log /root/run5.log "WALK: waiting for login" 120
 sleep 2
 login "$prvip" true || fail "private login during TUI run failed"
 wait_log /root/run5.log "EXIT=" 90
+d exec "$srv" grep -q "WALK: back on the firewall screen" /root/run5.log || { d exec "$srv" grep -a WALK /root/run5.log; fail "the review did not go back to the questions"; }
 d exec "$srv" grep -q "WALK: done screen" /root/run5.log || { d exec "$srv" tail -40 /root/run5.log; fail "TUI did not reach the done screen"; }
 d exec "$srv" grep -q "EXIT=0" /root/run5.log || { d exec "$srv" tail -40 /root/run5.log; fail "TUI run failed"; }
 d exec "$srv" grep -q '"confirm_by": "login"' /etc/secure-setup/plan.json || fail "TUI did not save the local plan"
 d exec "$srv" grep -q '"local": true' /etc/secure-setup/plan.json || fail "saved plan is not marked local"
-echo "   TUI walked all screens, saved /etc/secure-setup/plan.json, confirmed by login"
+d exec "$srv" systemctl is-active --quiet secure-setup-cloudflare-sync.timer || fail "refresh timer not back with web ports"
+echo "   TUI walked all screens, went back from the review once, saved /etc/secure-setup/plan.json, confirmed by login"
 
 echo "== run 6: reboot at the end; the boot check reports after the restart"
 d exec "$srv" sh -c 'sed "s/\"reboot\": false/\"reboot\": true/" /root/plan-self.json > /root/plan-reboot.json'

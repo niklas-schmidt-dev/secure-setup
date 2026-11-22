@@ -15,7 +15,7 @@ expect {
 }
 foreach i {1 2 3 4 5 6 7 8} { sleep 0.4; send "\r" }
 expect {
-  -re {Apply this setup now} { sleep 0.4; send "y" }
+  -re {Apply this setup now} { sleep 0.4; send "\r" }
   timeout { puts "\nWALK: FAIL no apply question"; exit 1 }
 }
 set timeout 120
