@@ -145,6 +145,29 @@ func TestReadDoesNotValidate(t *testing.T) {
 	}
 }
 
+// Public ports are open to everyone, so they can be neither a web port (that
+// one is for Cloudflare only) nor the SSH port.
+func TestValidatePublicPorts(t *testing.T) {
+	p := Default()
+	p.Server.Host = "203.0.113.10"
+	p.Firewall.PublicTCPPorts, p.Firewall.PublicUDPPorts = []int{25, 587}, []int{51820}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got := PublicPorts(p.Firewall); got != "TCP 25, 587 and UDP 51820" {
+		t.Fatalf("PublicPorts = %q", got)
+	}
+	if PublicPorts(Default().Firewall) != "" {
+		t.Fatal("the default plan opens a public port")
+	}
+	for name, ports := range map[string][]int{"a web port": {443}, "the SSH port": {22}, "out of range": {70000}} {
+		p.Firewall.PublicTCPPorts = ports
+		if err := p.Validate(); err == nil {
+			t.Errorf("public_tcp_ports with %s accepted", name)
+		}
+	}
+}
+
 func TestParsePorts(t *testing.T) {
 	got, err := ParsePorts("8080, 22;22 443")
 	if err != nil || FormatPorts(got) != "22, 443, 8080" {

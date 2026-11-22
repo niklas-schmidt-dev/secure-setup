@@ -77,6 +77,17 @@ func TestReadStatus(t *testing.T) {
 		t.Fatalf("existing network: %+v", st)
 	}
 
+	// Ports the plan opened to everyone are named as such; the rule for
+	// Tailscale's own UDP port is not one of them.
+	lines = append(lockedDown(), `RULE=tcp dport { 25, 587 } accept comment "public"`, `RULE=udp dport 51820 accept comment "public"`)
+	st, _ = ReadStatus(context.Background(), statusHost{goodHost(), lines})
+	if !st.OK || st.PublicPorts != "TCP 25, 587 and UDP 51820" || !strings.Contains(st.Text(), "TCP 25, 587 and UDP 51820, open to the whole internet") {
+		t.Fatalf("public ports: %q\n%s", st.PublicPorts, st.Text())
+	}
+	if plain, _ := ReadStatus(context.Background(), statusHost{goodHost(), lockedDown()}); plain.PublicPorts != "" {
+		t.Fatalf("public ports on a server without any: %q", plain.PublicPorts)
+	}
+
 	for name, c := range map[string]struct {
 		lines []string
 		host  func(*lockdownHost)

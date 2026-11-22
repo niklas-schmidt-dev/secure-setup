@@ -317,6 +317,9 @@ func describe(p *plan.Plan) string {
 	} else {
 		fmt.Fprintf(&b, "  web ports       TCP %s from Cloudflare\n", orNone(plan.FormatPorts(p.Firewall.WebPorts)))
 	}
+	if public := plan.PublicPorts(p.Firewall); public != "" {
+		fmt.Fprintf(&b, "  public ports    %s, open to the whole internet\n", public)
+	}
 	fmt.Fprintf(&b, "  ping            %v\n", p.Firewall.AllowPing)
 	fmt.Fprintf(&b, "  sshd keys only  %v\n", p.SSH.Harden)
 	fmt.Fprintf(&b, "  system update   %v\n", p.UpdateSystem)
@@ -367,6 +370,8 @@ func cmdRender(args []string) error {
 		TailnetTCPPorts:  p.Firewall.TailnetPorts,
 		TailnetAll:       p.Firewall.TailnetAll,
 		WebPorts:         p.Firewall.WebPorts,
+		PublicTCPPorts:   p.Firewall.PublicTCPPorts,
+		PublicUDPPorts:   p.Firewall.PublicUDPPorts,
 		AllowPing:        p.Firewall.AllowPing,
 		TailscaleUDPPort: p.Tailscale.UDPPort,
 	})

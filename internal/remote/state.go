@@ -23,6 +23,7 @@ type State struct {
 	AdminAddress    string // address the admin rule is bound to, "" for Tailscale
 	AdminPorts      string // "22, 8080", or "all"
 	WebPorts        string // "443", "" without a web rule
+	PublicPorts     string // "TCP 25, 587 and UDP 51820", "" when nothing is open to everyone
 	CloudflareV4    int    // prefixes in the loaded sets
 	CloudflareV6    int
 	NFTAtBoot       bool   // nftables.service is enabled
@@ -118,6 +119,7 @@ var (
 	policyRe    = regexp.MustCompile(`policy (\w+);`)
 	adminRuleRe = regexp.MustCompile(`^iifname "([^"]+)"(?: ip6? daddr (\S+))?(?: tcp dport (\{[^}]*\}|\d+))? counter .*accept$`)
 	webRuleRe   = regexp.MustCompile(`^ip saddr @cloudflare_v4 tcp dport (\{[^}]*\}|\d+) accept$`)
+	publicRe    = regexp.MustCompile(`^(tcp|udp) dport (\{[^}]*\}|\d+) accept comment "public"$`)
 )
 
 func (s *State) readRules(rules []string) {
@@ -133,6 +135,12 @@ func (s *State) readRules(rules []string) {
 		}
 		if m := webRuleRe.FindStringSubmatch(r); m != nil {
 			s.WebPorts = portList(m[1])
+		}
+		if m := publicRe.FindStringSubmatch(r); m != nil {
+			if s.PublicPorts != "" {
+				s.PublicPorts += " and "
+			}
+			s.PublicPorts += strings.ToUpper(m[1]) + " " + portList(m[2])
 		}
 	}
 }

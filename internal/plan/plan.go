@@ -78,7 +78,12 @@ type Tailscale struct {
 
 // Firewall is the inbound policy.
 type Firewall struct {
-	WebPorts        []int  `json:"web_ports"`
+	WebPorts []int `json:"web_ports"`
+	// PublicTCPPorts and PublicUDPPorts are open to the whole internet, for
+	// a service that cannot sit behind Cloudflare or the tailnet: mail, a
+	// game server, WireGuard. The SSH port is never one of them.
+	PublicTCPPorts  []int  `json:"public_tcp_ports,omitempty"`
+	PublicUDPPorts  []int  `json:"public_udp_ports,omitempty"`
 	AllowPing       bool   `json:"allow_ping"`
 	TailnetPorts    []int  `json:"tailnet_ports"`
 	TailnetAll      bool   `json:"tailnet_all"`
@@ -184,9 +189,17 @@ func (p *Plan) Validate() error {
 	if p.Tailscale.UDPPort < 1 || p.Tailscale.UDPPort > 65535 {
 		errs = append(errs, fmt.Errorf("tailscale UDP port %d is out of range", p.Tailscale.UDPPort))
 	}
-	for _, port := range append(append([]int{}, p.Firewall.WebPorts...), p.Firewall.TailnetPorts...) {
+	for _, port := range slices.Concat(p.Firewall.WebPorts, p.Firewall.TailnetPorts, p.Firewall.PublicTCPPorts, p.Firewall.PublicUDPPorts) {
 		if port < 1 || port > 65535 {
 			errs = append(errs, fmt.Errorf("port %d is out of range", port))
+		}
+	}
+	for _, port := range p.Firewall.PublicTCPPorts {
+		if slices.Contains(p.Firewall.WebPorts, port) {
+			errs = append(errs, fmt.Errorf("port %d is in web_ports and in public_tcp_ports: it would be open to everyone, not only to Cloudflare", port))
+		}
+		if !p.Local && port == p.Server.Port {
+			errs = append(errs, fmt.Errorf("public_tcp_ports contains the SSH port %d: that would open SSH to the internet again", port))
 		}
 	}
 	if p.Firewall.RollbackSeconds < 30 || p.Firewall.RollbackSeconds > 900 {
@@ -343,6 +356,19 @@ func ParsePorts(s string) ([]int, error) {
 		}
 	}
 	return out, nil
+}
+
+// PublicPorts describes the ports a plan opens to everyone, such as
+// "TCP 25, 587 and UDP 51820", or "" when there are none.
+func PublicPorts(f Firewall) string {
+	var parts []string
+	if len(f.PublicTCPPorts) > 0 {
+		parts = append(parts, "TCP "+FormatPorts(f.PublicTCPPorts))
+	}
+	if len(f.PublicUDPPorts) > 0 {
+		parts = append(parts, "UDP "+FormatPorts(f.PublicUDPPorts))
+	}
+	return strings.Join(parts, " and ")
 }
 
 // FormatPorts is the inverse of ParsePorts.

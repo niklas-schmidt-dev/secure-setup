@@ -72,7 +72,7 @@ d exec -i "$cli" sh -c 'cat > /root/plan.json' <<JSON
   "reboot": true,
   "server": {"host": "192.0.2.1", "port": 22, "user": "root", "key_path": "/root/.ssh/id_ed25519"},
   "tailscale": {"admin_interface": "eth1", "udp_port": 41641, "use_existing_network": true, "admin_address": "$prvip"},
-  "firewall": {"web_ports": [443], "allow_ping": true, "tailnet_ports": [22, 8080], "rollback_seconds": 30, "cloudflare_sync": true},
+  "firewall": {"web_ports": [443], "public_tcp_ports": [2525], "allow_ping": true, "tailnet_ports": [22, 8080], "rollback_seconds": 30, "cloudflare_sync": true},
   "ssh": {"harden": true, "add_local_key": true}
 }
 JSON
@@ -97,6 +97,14 @@ d exec "$cli" nc -z -w 5 "$prvip" 22 && echo "   private ssh open"
 d exec "$cli" nc -z -w 5 "$prvip" 8080 2>/dev/null && fail "nothing listens on 8080, nc should not connect" || true
 d exec "$srv" nft list chain inet secure_setup input | grep -Eq "iifname \"eth1\" $daddr $prvip tcp dport \\{ 22, 8080 \\} counter packets [0-9]+ bytes [0-9]+ accept" || fail "admin rule not bound to $prvip on eth1"
 echo "   tailnet rule present, bound to $prvip"
+# A port the plan opens to everyone lets the connection attempt through to
+# the server (nothing listens, so it is refused at once); the port next to
+# it is dropped like everything else.
+out=$(d exec "$cli" nc -z -v -w 5 "$pubip" 2525 2>&1 || true)
+echo "$out" | grep -qi "refused" || fail "public port 2525 is not open: $out"
+out=$(d exec "$cli" nc -z -v -w 5 "$pubip" 2526 2>&1 || true)
+echo "$out" | grep -qi "timed out" || fail "port 2526 is not dropped: $out"
+echo "   public port 2525 open to everyone, 2526 dropped"
 d exec "$srv" nft list set inet secure_setup cloudflare_v4 | grep -q '173.245.48.0/20' && echo "   cloudflare set populated"
 d exec "$srv" sh -c 'systemctl is-enabled nftables' | grep -q enabled && echo "   nftables.service enabled"
 d exec "$srv" systemctl is-active --quiet secure-setup-cloudflare-sync.timer && echo "   cloudflare sync timer active"
@@ -119,6 +127,7 @@ d exec "$cli" secure-setup status -f /root/plan.json >/tmp/e2e-status.log 2>&1 |
 sed 's/^/   /' /tmp/e2e-status.log
 grep -q "TCP 22, 8080 on eth1 to $prvip only" /tmp/e2e-status.log || fail "status does not show the admin rule"
 grep -Eq "TCP 443 from Cloudflare only \\([0-9]+ IPv4 and [0-9]+ IPv6 ranges, refreshed daily\\)" /tmp/e2e-status.log || fail "status does not show the web rule"
+grep -q "TCP 2525, open to the whole internet" /tmp/e2e-status.log || fail "status does not show the public port"
 grep -q "port 22, keys only" /tmp/e2e-status.log || fail "status does not show the sshd policy"
 grep -q "Updates *install by themselves" /tmp/e2e-status.log || fail "status does not show the automatic updates"
 grep -q "No problems found" /tmp/e2e-status.log || fail "status did not end with its verdict"

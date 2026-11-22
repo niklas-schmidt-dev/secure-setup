@@ -41,6 +41,8 @@ type Params struct {
 	TailnetTCPPorts  []int    // TCP ports reachable from the tailnet; must contain the SSH port
 	TailnetAll       bool     // allow everything from the tailnet instead of only TailnetTCPPorts
 	WebPorts         []int    // TCP ports Cloudflare may reach (443, optionally 80); empty = no web traffic
+	PublicTCPPorts   []int    // TCP ports open to the whole internet
+	PublicUDPPorts   []int    // UDP ports open to the whole internet
 	AllowPing        bool     // rate-limited ICMP echo from anywhere
 	TailscaleUDPPort int      // WireGuard port for direct Tailscale connections
 	ElementsPath     string   // include file holding the Cloudflare set elements
@@ -53,6 +55,8 @@ type view struct {
 	AdminMatch      string // `iifname "tailscale0"`, or with `ip daddr ...` for AdminAddress
 	TailnetPortList string
 	WebPortList     string
+	PublicTCPList   string
+	PublicUDPList   string
 	WANSet          string // "eth0", or { "eth0", "he-ipv6" } with extra uplinks
 }
 
@@ -75,6 +79,8 @@ func Render(p Params) (string, error) {
 		AdminMatch:      adminMatch(p.AdminInterface, p.AdminAddress),
 		TailnetPortList: joinPorts(p.TailnetTCPPorts),
 		WebPortList:     joinPorts(p.WebPorts),
+		PublicTCPList:   joinPorts(p.PublicTCPPorts),
+		PublicUDPList:   joinPorts(p.PublicUDPPorts),
 		WANSet:          ifaceSet(append([]string{p.WANInterface}, p.ExtraWAN...)),
 	}
 	var buf bytes.Buffer
@@ -143,6 +149,17 @@ func (p Params) normalized() (Params, error) {
 	}
 	if p.WebPorts, err = cleanPorts(p.WebPorts); err != nil {
 		return p, fmt.Errorf("nftgen: web ports: %w", err)
+	}
+	if p.PublicTCPPorts, err = cleanPorts(p.PublicTCPPorts); err != nil {
+		return p, fmt.Errorf("nftgen: public TCP ports: %w", err)
+	}
+	if p.PublicUDPPorts, err = cleanPorts(p.PublicUDPPorts); err != nil {
+		return p, fmt.Errorf("nftgen: public UDP ports: %w", err)
+	}
+	for _, port := range p.PublicTCPPorts {
+		if slices.Contains(p.WebPorts, port) {
+			return p, fmt.Errorf("nftgen: port %d is a web port and a public port", port)
+		}
 	}
 	if !p.TailnetAll && len(p.TailnetTCPPorts) == 0 {
 		return p, errors.New("nftgen: no tailnet ports allowed: that would lock you out")

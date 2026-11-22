@@ -24,6 +24,7 @@ type Status struct {
 	AdminAddress    string   `json:"admin_address,omitempty"`
 	AdminPorts      string   `json:"admin_ports,omitempty"`
 	WebPorts        string   `json:"web_ports,omitempty"`
+	PublicPorts     string   `json:"public_ports,omitempty"`
 	CloudflareV4    int      `json:"cloudflare_v4_ranges"`
 	CloudflareV6    int      `json:"cloudflare_v6_ranges"`
 	CloudflareSync  bool     `json:"cloudflare_refresh"`
@@ -55,6 +56,7 @@ func ReadStatus(ctx context.Context, host remote.Host) (*Status, error) {
 		AdminAddress:    s.AdminAddress,
 		AdminPorts:      s.AdminPorts,
 		WebPorts:        s.WebPorts,
+		PublicPorts:     s.PublicPorts,
 		CloudflareV4:    s.CloudflareV4,
 		CloudflareV6:    s.CloudflareV6,
 		CloudflareSync:  s.SyncTimer,
@@ -170,6 +172,9 @@ func (st *Status) Text() string {
 		line("Web", fmt.Sprintf("TCP %s from Cloudflare only (%d IPv4 and %d IPv6 ranges, %s)", st.WebPorts, st.CloudflareV4, st.CloudflareV6, refresh))
 	case st.FirewallLoaded:
 		line("Web", "no web port open")
+	}
+	if st.PublicPorts != "" {
+		line("Public", st.PublicPorts+", open to the whole internet")
 	}
 	if st.Tailscale != "" {
 		v := st.Tailscale

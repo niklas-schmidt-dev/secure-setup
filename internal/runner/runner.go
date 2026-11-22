@@ -890,6 +890,14 @@ func (r *Runner) extraWAN(log func(string)) []string {
 
 func (r *Runner) stageFirewallOn(ctx context.Context, host remote.Host, log func(string)) error {
 	p := r.o.Plan
+	// The plan can only know the port a remote run connects to; sshd's own
+	// port is known here.
+	if slices.Contains(p.Firewall.PublicTCPPorts, r.facts.SSHPort) {
+		return fmt.Errorf("public_tcp_ports contains %d, the port sshd listens on: that would open SSH to the internet again", r.facts.SSHPort)
+	}
+	if public := plan.PublicPorts(p.Firewall); public != "" {
+		log("open to the whole internet, as the plan asks: " + public)
+	}
 	elements := nftgen.RenderElements(nil, nil)
 	if len(p.Firewall.WebPorts) > 0 {
 		log("fetching Cloudflare IP ranges")
@@ -908,6 +916,8 @@ func (r *Runner) stageFirewallOn(ctx context.Context, host remote.Host, log func
 		TailnetTCPPorts:  p.Firewall.TailnetPorts,
 		TailnetAll:       p.Firewall.TailnetAll,
 		WebPorts:         p.Firewall.WebPorts,
+		PublicTCPPorts:   p.Firewall.PublicTCPPorts,
+		PublicUDPPorts:   p.Firewall.PublicUDPPorts,
 		AllowPing:        p.Firewall.AllowPing,
 		TailscaleUDPPort: p.Tailscale.UDPPort,
 	})

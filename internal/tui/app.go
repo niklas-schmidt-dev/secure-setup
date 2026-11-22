@@ -413,6 +413,9 @@ func (m *model) summary() string {
 	default:
 		line("Web", "none")
 	}
+	if public := plan.PublicPorts(p.Firewall); public != "" {
+		line("Public ports", public+", open to the whole internet (from the plan)")
+	}
 	line("Ping", yesNo(p.Firewall.AllowPing))
 	line("Password login", map[bool]string{true: "disabled (keys only)", false: "unchanged"}[p.SSH.Harden])
 	line("System update", map[bool]string{true: "first, before anything is installed", false: "skipped"}[p.UpdateSystem])
@@ -1024,6 +1027,9 @@ func Summary(p *plan.Plan, r *runner.Result) string {
 			where = "; point a proxied DNS record at " + public
 		}
 		line("Web", "TCP "+plan.FormatPorts(r.WebPorts)+" from Cloudflare only"+where)
+	}
+	if public := plan.PublicPorts(p.Firewall); public != "" {
+		warn("Public ports", public+", open to the whole internet")
 	}
 	switch {
 	case r.Local && r.ConfirmedBy != "":

@@ -556,6 +556,26 @@ func TestCheckConfirm(t *testing.T) {
 	}
 }
 
+// The plan cannot know which port sshd listens on; staging refuses a public
+// port that is sshd's, before anything is written.
+func TestPublicPortsNeverOpenSSH(t *testing.T) {
+	p := plan.Default()
+	p.Server.Host, p.Firewall.WebPorts, p.Firewall.WANInterface = "203.0.113.10", nil, "eth0"
+	p.Firewall.PublicTCPPorts = []int{2222}
+	r := New(Options{Plan: &p})
+	r.facts = &remote.Facts{SSHPort: 2222, NFT: true, PkgMgr: "apt-get"}
+	var scripts []string
+	err := r.stageFirewallOn(context.Background(), scriptHost{scripts: &scripts}, func(string) {})
+	if err == nil || !strings.Contains(err.Error(), "open SSH to the internet again") || len(scripts) != 0 {
+		t.Fatalf("err %v, scripts %q", err, scripts)
+	}
+	r.facts.SSHPort = 22
+	p.Firewall.TailnetPorts = []int{22}
+	if err := r.stageFirewallOn(context.Background(), scriptHost{scripts: &scripts}, func(string) {}); err != nil || len(scripts) == 0 {
+		t.Fatalf("a public port that is not sshd's: %v", err)
+	}
+}
+
 func before(steps []string, a, b string) bool {
 	return slices.Index(steps, a) >= 0 && slices.Index(steps, a) < slices.Index(steps, b)
 }

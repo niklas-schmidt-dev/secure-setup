@@ -86,6 +86,22 @@ if reach a 10.91.4.1 22; then echo "FAIL: another address on the admin interface
 if reach a 10.91.3.2 8080; then echo "FAIL: the internet-facing admin interface reaches the workload"; exit 1; fi
 echo "existing network: SSH only to the admin address; its interface is filtered like the internet"
 
+# Public ports: what the plan opens to everyone is reachable from an uplink,
+# on the host and as a published container port; nothing else is, SSH least
+# of all.
+nc -lk 2525 </dev/null >/dev/null 2>&1 &
+sleep 1
+sed 's/"eth0"/"upa"/g' /t/goldens/default.nft > /tmp/no-public.nft
+nft -f /tmp/no-public.nft
+if reach a 10.91.1.1 2525 || reach a 10.91.3.2 8080; then echo "FAIL: control did not reproduce"; exit 1; fi
+sed -e 's/"eth0"/"upa"/g' -e 's/{ 25, 587 }/{ 2525, 8080 }/g' /t/goldens/public-ports.nft > /tmp/public.nft
+nft -f /tmp/public.nft
+reach a 10.91.1.1 2525 || { echo "FAIL: a public port on the host is not reachable"; exit 1; }
+reach a 10.91.3.2 8080 || { echo "FAIL: a public port published by the workload is not reachable"; exit 1; }
+if reach a 10.91.1.1 22; then echo "FAIL: public ports opened SSH"; exit 1; fi
+if reach a 10.91.2.2 9090; then echo "FAIL: public ports let the uplink reach another port"; exit 1; fi
+echo "public ports: reachable from the internet on the host and on the workload, and nothing else"
+
 # DHCPv6: the reply to a lease request comes from the router's link-local
 # address, port 547, to this host's port 546. It answers a multicast, so it is
 # not "established" traffic; dropped, the IPv6 address is lost when the lease

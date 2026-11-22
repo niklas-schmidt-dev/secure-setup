@@ -60,6 +60,16 @@ table inet {{.TableName}} {
 		ip saddr @cloudflare_v4 tcp dport { {{.WebPortList}} } accept
 		ip6 saddr @cloudflare_v6 tcp dport { {{.WebPortList}} } accept
 {{- end}}
+{{- if or .PublicTCPPorts .PublicUDPPorts}}
+
+		# Public: open to the whole internet, because the plan names these ports
+{{- if .PublicTCPPorts}}
+		tcp dport { {{.PublicTCPList}} } accept comment "public"
+{{- end}}
+{{- if .PublicUDPPorts}}
+		udp dport { {{.PublicUDPList}} } accept comment "public"
+{{- end}}
+{{- end}}
 	}
 
 	chain forward {
@@ -75,6 +85,16 @@ table inet {{.TableName}} {
 		# Published container ports: the internet reaches them only through Cloudflare on the web ports
 		iifname {{.WANSet}} meta l4proto tcp ip saddr @cloudflare_v4 ct original proto-dst { {{.WebPortList}} } accept
 		iifname {{.WANSet}} meta l4proto tcp ip6 saddr @cloudflare_v6 ct original proto-dst { {{.WebPortList}} } accept
+{{- end}}
+{{- if or .PublicTCPPorts .PublicUDPPorts}}
+
+		# Published container ports the plan opens to the whole internet
+{{- if .PublicTCPPorts}}
+		iifname {{.WANSet}} meta l4proto tcp ct original proto-dst { {{.PublicTCPList}} } accept comment "public"
+{{- end}}
+{{- if .PublicUDPPorts}}
+		iifname {{.WANSet}} meta l4proto udp ct original proto-dst { {{.PublicUDPList}} } accept comment "public"
+{{- end}}
 {{- end}}
 	}
 
