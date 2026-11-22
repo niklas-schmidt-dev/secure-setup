@@ -92,11 +92,16 @@ d exec -i "$cli" sh -c 'cat > /root/plan-bad.json' <<JSON
   "ssh": {"harden": false, "add_local_key": false}
 }
 JSON
+t0=$(date +%s)
 if d exec "$cli" secure-setup apply -f /root/plan-bad.json --yes >/tmp/e2e-run2.log 2>&1; then
 	cat /tmp/e2e-run2.log; fail "run 2 should have failed"
 fi
+took=$(($(date +%s) - t0))
 tail -8 /tmp/e2e-run2.log
 grep -q "rolled back" /tmp/e2e-run2.log || fail "run 2 did not report the rollback"
+# The window is 30 s. Waiting it out a second time took well over 70 s.
+[ "$took" -lt 60 ] || fail "run 2 took ${took}s: it did not end once the server had rolled back"
+echo "   ended after ${took}s, once the server had rolled back"
 d exec "$cli" nc -z -w 5 "$prvip" 22 && echo "   private ssh open again after rollback"
 d exec "$srv" nft list chain inet secure_setup input | grep -Eq "iifname \"eth1\" ip daddr $prvip tcp dport \\{ 22, 8080 \\} counter packets [0-9]+ bytes [0-9]+ accept" || fail "run 1 rules not restored"
 echo "   previous (run 1) rules restored"

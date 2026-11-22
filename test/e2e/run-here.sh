@@ -82,6 +82,23 @@ d exec "$srv" grep -q "EXIT=1" /root/run0.log || fail "run 0 should exit 1"
 d exec "$srv" nft list table inet secure_setup >/dev/null 2>&1 && fail "table present after rollback with no previous state" || echo "   rolled back: table removed, public ssh open"
 d exec "$cli" nc -z -w 5 "$pubip" 22 || fail "public ssh not open after rollback"
 
+echo "== run 0b: a second run must not build on the unconfirmed rules of a run that died"
+d exec -d "$srv" sh -c 'secure-setup here -f /root/plan-login.json --yes > /root/run0a.log 2>&1'
+wait_log /root/run0a.log "Now prove the new rules" 60
+d exec "$srv" pkill -9 -f 'secure-setup here' || fail "the first run was not running"
+d exec "$srv" nft list table inet secure_setup >/dev/null 2>&1 || fail "the dead run's rules are not live"
+d exec "$srv" systemctl is-active --quiet secure-setup-rollback.timer || fail "the dead run's rollback timer is not armed"
+d exec -d "$srv" sh -c 'secure-setup here -f /root/plan-login.json --yes > /root/run0b.log 2>&1'
+wait_log /root/run0b.log "the firewall of an earlier run still waits for its confirmation" 20
+wait_log /root/run0b.log "Now prove the new rules" 90
+d exec "$srv" grep -q "an earlier secure-setup run rolled its firewall back" /root/run0b.log || { d exec "$srv" cat /root/run0b.log; fail "the second run did not start from the rolled-back state"; }
+d exec "$srv" grep -q "no previous secure-setup table; rollback removes the new one" /root/run0b.log || { d exec "$srv" cat /root/run0b.log; fail "the second run saved the dead run's unconfirmed rules as the state to roll back to"; }
+echo "   the second run waited for the dead run's rollback and staged from the state before it"
+d exec "$srv" pkill -9 -f 'secure-setup here' || true
+d exec "$srv" secure-setup undo --here --yes >/dev/null
+d exec "$srv" nft list table inet secure_setup >/dev/null 2>&1 && fail "table present after undo"
+d exec "$cli" nc -z -w 5 "$pubip" 22 || fail "public ssh not open after undo"
+
 echo "== install the client's key on the server"
 d exec "$srv" sh -c "mkdir -p /root/.ssh && printf '%s\n' '$pubkey' > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys"
 login "$pubip" true || fail "key login over public address failed before the run"

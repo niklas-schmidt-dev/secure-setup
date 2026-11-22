@@ -77,7 +77,7 @@ type Facts struct {
 	FirewalldEnabled bool   // enabled at boot, even if not running now
 	SecureSetupTable bool   // our nftables table is already loaded
 	RolledBack       string // timestamp of a previous rollback, if any
-	RollbackArmed    bool   // a rollback timer from an earlier run is still active
+	RollbackArmed    bool   // an earlier run's firewall still awaits its confirmation or its rollback
 
 	aptUpdated bool
 }
@@ -110,7 +110,7 @@ if systemctl is-active --quiet firewalld 2>/dev/null; then echo FIREWALLD=1; els
 if systemctl is-enabled --quiet firewalld 2>/dev/null; then echo FIREWALLD_ENABLED=1; else echo FIREWALLD_ENABLED=0; fi
 if command -v nft >/dev/null 2>&1 && nft list table inet secure_setup >/dev/null 2>&1; then echo SS_TABLE=1; else echo SS_TABLE=0; fi
 if [ -f /var/lib/secure-setup/rolled-back ]; then printf 'ROLLED_BACK=%s\n' "$(cat /var/lib/secure-setup/rolled-back)"; fi
-if systemctl is-active --quiet secure-setup-rollback.timer 2>/dev/null; then echo ROLLBACK_ARMED=1; fi
+if ` + rollbackPendingTest + `; then echo ROLLBACK_ARMED=1; fi
 `
 
 // onCardScript defines `oncard DEV DEPTH`: true when DEV is a network card

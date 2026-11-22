@@ -85,6 +85,9 @@ func (r *Runner) hereDetect(ctx context.Context, log func(string)) error {
 	if err != nil {
 		return err
 	}
+	if f, err = r.settleEarlierRun(ctx, r.local, f, log); err != nil {
+		return err
+	}
 	r.facts = f
 	r.result.Facts = f
 	if r.local.Sudo {
@@ -374,7 +377,8 @@ func (r *Runner) confirmByLogin(ctx context.Context, log func(string)) error {
 		}
 		left := time.Until(deadline)
 		if left <= 0 {
-			return r.waitForLocalRollback(ctx, log, errors.New("no login over the private network arrived in time"))
+			r.attention("no login arrived; waiting for this machine to restore its previous firewall")
+			return r.waitForRollback(ctx, r.local, log, errors.New("no login over the private network arrived in time"))
 		}
 		if time.Since(lastNote) >= 15*time.Second {
 			log(fmt.Sprintf("waiting for a login to %s:%d ... %ds left", addr, r.facts.SSHPort, int(left.Seconds())))
@@ -530,27 +534,6 @@ func (r *Runner) keepFirewall(ctx context.Context, log func(string)) error {
 	}
 	_, _ = r.local.Output(ctx, "rm -f "+ConfirmExpectPath+" "+ConfirmedPath)
 	return nil
-}
-
-func (r *Runner) waitForLocalRollback(ctx context.Context, log func(string), cause error) error {
-	r.attention("no login arrived; waiting for this machine to restore its previous firewall")
-	log("reason: " + shortErr(cause))
-	deadline := time.Now().Add(25 * time.Second)
-	for {
-		if at := r.rollbackMarker(ctx, r.local); at != "" {
-			log("the previous firewall state is active again")
-			return r.rolledBackError(at, cause)
-		}
-		if time.Now().After(deadline) {
-			log("warning: the rollback marker was not found; check `nft list ruleset`")
-			return fmt.Errorf("the new firewall was not confirmed; the rollback should have fired but left no marker: %w", cause)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
 }
 
 func (r *Runner) hereVerify(ctx context.Context, log func(string)) error {

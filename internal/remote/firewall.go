@@ -56,6 +56,21 @@ const bootIncludeMarker = "# secure-setup: added the next line"
 const ufwInitScript = `ufw_init=; for p in /lib/ufw/ufw-init /usr/lib/ufw/ufw-init; do if [ -x "$p" ]; then ufw_init=$p; break; fi; done
 `
 
+// rollbackPendingTest is a shell test that succeeds while an applied ruleset
+// still awaits its outcome: its timer is armed and nothing has claimed the
+// outcome yet, or the rollback is running right now.
+const rollbackPendingTest = `{ systemctl is-active --quiet ` + RollbackUnit + `.service 2>/dev/null || { systemctl is-active --quiet ` + RollbackUnit + `.timer 2>/dev/null && [ ! -e ` + DecidedDir + ` ]; }; }`
+
+// RollbackPending reports whether an earlier run's firewall still awaits its
+// confirmation or its rollback.
+func RollbackPending(ctx context.Context, c Host) (bool, error) {
+	out, err := c.Output(ctx, "if "+rollbackPendingTest+"; then echo pending; fi")
+	if err != nil {
+		return false, fmt.Errorf("look for a pending rollback: %w", err)
+	}
+	return out == "pending", nil
+}
+
 // FirewallFiles is what PrepareFirewall installs.
 type FirewallFiles struct {
 	Ruleset        string // full nftables.conf

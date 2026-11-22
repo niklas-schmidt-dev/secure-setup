@@ -237,7 +237,7 @@ func cmdApply(ctx context.Context, args []string) error {
 			return errors.New("not confirmed")
 		}
 	}
-	opts := runner.Options{Plan: &p, Prompt: prompt}
+	opts := runner.Options{Plan: &p, Prompt: prompt, Unattended: *yes}
 	opts.Report = textui.Reporter(os.Stdout, runner.New(opts).Steps())
 	r := runner.New(opts)
 	res, err := r.Run(ctx)
